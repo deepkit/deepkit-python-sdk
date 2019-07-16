@@ -6,7 +6,7 @@ install:
 
 docker:
     binds:
-        - "../../deepkit:/deepkit-sdk"
+        - "../../:/deepkit-sdk"
     env:
         - PYTHONPATH=/deepkit-sdk
 
