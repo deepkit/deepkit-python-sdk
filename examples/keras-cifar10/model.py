@@ -14,11 +14,13 @@ import os
 
 import deepkit
 
-batch_size = deepkit.get_parameter('batch_size')
+batch_size = deepkit.intparam('batch_size')
 num_classes = 10
-epochs = deepkit.get_parameter('epochs')
+epochs = deepkit.intparam('epochs')
 data_augmentation = False
 num_predictions = 20
+
+
 save_dir = os.path.join(os.getcwd(), 'saved_models')
 model_name = 'keras_cifar10_trained_model.h5'
 
@@ -26,11 +28,11 @@ model_name = 'keras_cifar10_trained_model.h5'
 (x_train, y_train), (x_test, y_test) = cifar10.load_data()
 
 
-x_train = x_train[0:deepkit.get_parameter('train_samples')]
-y_train = y_train[0:deepkit.get_parameter('train_samples')]
+x_train = x_train[0:deepkit.intparam('train_samples')]
+y_train = y_train[0:deepkit.intparam('train_samples')]
 
-x_test = x_test[0:deepkit.get_parameter('test_samples')]
-y_test = y_test[0:deepkit.get_parameter('test_samples')]
+x_test = x_test[0:deepkit.intparam('test_samples')]
+y_test = y_test[0:deepkit.intparam('test_samples')]
 
 print('x_train shape:', x_train.shape)
 print(x_train.shape[0], 'train samples')
@@ -52,7 +54,7 @@ model.add(Dense(32, activation='relu'))
 model.add(Dropout(0.5))
 model.add(Dense(num_classes, activation='softmax'))
 
-opt = keras.optimizers.Adadelta(lr=deepkit.get_parameter('lr'))
+opt = keras.optimizers.Adadelta(lr=deepkit.floatparam('lr'))
 
 deepkit_callback = deepkit.create_keras_callback(
     model,
@@ -78,7 +80,6 @@ if not data_augmentation:
     model.fit(x_train, y_train,
               batch_size=batch_size,
               epochs=epochs,
-              verbose=0,
               callbacks=callbacks,
               validation_data=(x_test, y_test),
               shuffle=True)

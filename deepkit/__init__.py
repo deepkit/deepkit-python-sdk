@@ -4,7 +4,7 @@ import sys
 import time
 import os
 import json
-
+from collections import OrderedDict
 from deepkit.utils import get_parameter_by_path
 
 start_time = time.time()
@@ -13,7 +13,8 @@ loaded_job = None
 
 
 def stdout_api_call(command, **kwargs):
-    action = {'deepkit': command}
+    action = OrderedDict()
+    action['deepkit'] = command;
     action.update(kwargs)
     sys.stdout.flush()
     sys.stdout.write(simplejson.dumps(action) + '\n')
@@ -45,8 +46,6 @@ def get_job():
                 }
             }
 
-    print('loaded_job', loaded_job)
-
     return loaded_job
 
 
@@ -61,6 +60,21 @@ def get_parameter(path, default=None):
         return default
 
     return res
+
+
+def intparam(path, default=None):
+    v = get_parameter(path, None)
+    return int(v) if v is not None else default
+
+
+def floatparam(path, default=None):
+    v = get_parameter(path, None)
+    return float(v) if v is not None else default
+
+
+def param(path, default=None):
+    v = get_parameter(path, None)
+    return v if v is not None else default
 
 
 def get_run_time(precision=3):
@@ -141,7 +155,7 @@ class JobChannel:
                     len(y), self.name, len(self.traces)))
 
         for v in y:
-            if not isinstance(v, (int, float)) and not isinstance(v, six.string_types):
+            if not isinstance(v, (int, float)) and v is not None and not isinstance(v, six.string_types):
                 raise Exception('Could not send channel value for ' + self.name + ' since type ' + type(
                     y).__name__ + ' is not supported. Use int, float or string values.')
 
@@ -213,8 +227,7 @@ def create_channel(name, traces=None,
 
 def create_keras_callback(model,
                           insights=False, insights_x=None,
-                          additional_insights_layer=[],
-                          confusion_matrix=False, validation_data=None, validation_data_size=None):
+                          additional_insights_layer=[]):
     """
     :type validation_data: int|None: (x, y) or generator
     :type validation_data_size: int|None: Defines the size of validation_data, if validation_data is a generator
@@ -223,15 +236,9 @@ def create_keras_callback(model,
     if insights and (insights_x is None or insights_x is False):
         raise Exception('Can not build Keras callback with active insights but with invalid `insights_x` as input.')
 
-    if confusion_matrix and (validation_data is None or validation_data is False):
-        raise Exception(
-            'Can not build Keras callback with active confusion_matrix but with invalid `validation_data` as input.')
-
     from .deepkit_keras import KerasCallback
     callback = KerasCallback(model)
     callback.insights_x = insights_x
     callback.insight_layer = additional_insights_layer
-    callback.confusion_matrix = confusion_matrix
-    callback.set_validation_data(validation_data, validation_data_size)
 
     return callback

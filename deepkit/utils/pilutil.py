@@ -6,7 +6,8 @@ All rights reserved.
 A collection of image utilities using the Python Imaging Library (PIL).
 Note that PIL is not a dependency of SciPy and this module is not
 available on systems that don't have PIL installed.
-aetros-cli: This source is coming from the scipy package and is here copied since building the
+
+This source is coming from the scipy package and is here copied since building the
 scipy package on various computers takes a long time and is not necessary to have
 such a big package as requirement when you only need 2-3 methods. Also scipy has a lot of different
 licenes in their package, so we used here only code with the MIT license.

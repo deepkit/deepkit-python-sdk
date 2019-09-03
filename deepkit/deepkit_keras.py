@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
+from __future__ import division
 import os
 import time
-
 try:
     from cStringIO import StringIO
 except ImportError:
@@ -77,40 +77,20 @@ class JobImage:
 
 class KerasCallback(Callback):
     def __init__(self, model):
-        # self.params = {}
         super(KerasCallback, self).__init__()
         self.validation_per_batch = []
 
         self.model = model
         self.insight_layer = []
 
-        # self.ins = None
-        # self.insights_sample_path = None
+        self.epoch = 0
+
         self.data_validation = None
         self.data_validation_size = None
 
-        # self.force_insights = force_insights
-        #
         self.current = {}
-        # self.log_epoch = False
-        # self.confusion_matrix = True
-        #
-        # self.job_backend = job_backend
-        # self.logger = logger
-        # self._test_with_acc = None
         self.last_batch_time = time.time()
         self.start_time = time.time()
-        # self.made_batches = 0
-        # self.batches_per_second = 0
-        # self.stats = []
-        # self.last_current = None
-        #
-        # self.job_model = job_backend.get_job_model()
-        # self.filepath_best = self.job_model.get_weights_filepath_best()
-        # self.filepath_latest = self.job_model.get_weights_filepath_latest()
-        #
-        # ensure_dir(os.path.dirname(self.filepath_best))
-        #
         self.kpi_channel = None
         self.accuracy_channel = None
         self.all_losses = None
@@ -119,59 +99,8 @@ class KerasCallback(Callback):
 
         self.learning_rate_start = 0
 
-        # self.insights_x = None
-        # self.best_total_accuracy = 0
-
     def add_insight_layer(self, layer):
         self.insight_layer.append(layer)
-
-    def set_validation_data(self, validation_data, validation_data_size=None):
-
-        self.data_validation = validation_data
-        self.data_validation_size = None
-
-        if self.data_validation is None:
-            return
-
-        input_data_x = None
-
-        # It's dict of AETROS code generation
-        if isinstance(self.data_validation, dict) and 'x' in self.data_validation:
-
-            if is_generator(self.data_validation['x']):
-                # single input
-                input_data_x = self.data_validation['x']
-
-            elif isinstance(self.data_validation['x'], dict):
-                # multiple inputs named
-                input_data_x = next(six.itervalues(self.data_validation['x']))
-
-        # Not from AETROS code generation
-        else:
-            if is_generator(self.data_validation):
-                input_data_x = self.data_validation
-
-            elif isinstance(self.data_validation, dict):
-                input_data_x = next(six.itervalues(self.data_validation))
-
-            elif isinstance(self.data_validation, tuple):
-                input_data_x = self.data_validation[0]
-
-        if is_generator(input_data_x):
-            if validation_data_size is None:
-                raise Exception('validation_data_size needs to be set when a generator is given.')
-            self.data_validation_size = validation_data_size
-
-        elif input_data_x is not None:
-            self.data_validation_size = len(input_data_x)
-
-        if self.data_validation_size is None:
-            raise Exception(
-                'data_validation_size could not be determined for given validation_data. Please specify it.')
-
-    # def on_train_end(self, logs={}):
-    #     deepkit.add_file()
-        # deepkit.sync_weights()
 
     def on_train_begin(self, logs={}):
         self.start_time = time.time()
@@ -201,13 +130,13 @@ class KerasCallback(Callback):
             self.params['samples'] = self.params['nb_sample']
 
         xaxis = {
-            'range': [1, self.params['epochs']],
-            'title': u'Epoch ⇢'
+            # 'range': [1, self.params['epochs']],
+            # 'title': u'Epoch ⇢'
         }
         yaxis = {
-            'range': [1, 100],
-            'title': u'% Accuracy ⇢',
-            'dtick': 10
+            'tickformat': '%',
+            'hoverformat': '%',
+            'rangemode': 'tozero'
         }
 
         traces = ['training', 'validation']
@@ -226,8 +155,7 @@ class KerasCallback(Callback):
             max_optimization=True, xaxis=xaxis, yaxis=yaxis
         )
         self.loss_channel = deepkit.create_loss_channel('loss', xaxis=xaxis)
-        self.learning_rate_channel = deepkit.create_channel('learning rate', traces=['start', 'end'],
-                                                                     xaxis=xaxis)
+        self.learning_rate_channel = deepkit.create_channel('learning rate', traces=['start', 'end'], xaxis=xaxis)
 
         deepkit.epoch(0, self.params['epochs'])
         if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
@@ -262,10 +190,8 @@ class KerasCallback(Callback):
 
         deepkit.batch(batch + 1, self.current['nb_batches'], logs['size'])
 
-    # def write(self, line):
-    #     self.logger.info(line)
-
     def on_epoch_begin(self, epoch, logs={}):
+        self.epoch = epoch;
         self.learning_rate_start = self.get_learning_rate()
 
     def on_epoch_end(self, epoch, logs={}):
@@ -275,75 +201,42 @@ class KerasCallback(Callback):
 
         log['created'] = time.time()
         log['epoch'] = epoch + 1
-        if 'loss' not in log and len(self.validation_per_batch) > 0:
-            log['loss'] = sum(self.validation_per_batch) / float(len(self.validation_per_batch))
 
-        accuracy_log_name = 'acc'
-        val_accuracy_log_name = 'val_acc'
-
-        total_accuracy_validation = log.get(val_accuracy_log_name, 0)
-        total_accuracy_training = log.get(accuracy_log_name, 0)
-
-        # todo, make this optional
-        # if total_accuracy_validation > self.best_total_accuracy:
-        #     self.best_total_accuracy = total_accuracy_validation
-        #     self.best_epoch = log['epoch']
-        #     try:
-        #         self.model.save_weights(self.filepath_best, overwrite=True)
-        #     except:
-        #         # sometimes hangs with: IOError: Unable to create file (Unable to open file: name = ...
-        #         # without any obvious reason.
-        #         pass
-
-        try:
-            self.model.save_weights(self.filepath_latest, overwrite=True)
-        except Exception:
-            # sometimes hangs with: IOError: Unable to create file (Unable to open file: name = ...
-            # without any obvious reason.
-            pass
-
-        self.loss_channel.send(log['epoch'], log.get('loss', 0), log.get('val_loss', 0))
-
-        accuracy = [total_accuracy_training * 100, total_accuracy_validation * 100]
-        if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
-            accuracy = []
-            losses = []
-            for layer in self.model.output_layers:
-                accuracy.append(log.get(layer.name + '_acc', 0) * 100)
-                accuracy.append(log.get('val_' + layer.name + '_acc', 0) * 100)
-
-                losses.append(log.get(layer.name + '_loss', 0))
-                losses.append(log.get('val_' + layer.name + '_loss', 0))
-
-            self.all_losses.send(log['epoch'], losses)
-
-        self.accuracy_channel.send(log['epoch'], accuracy)
+        self.send_metrics(logs, log['epoch'])
 
         deepkit.epoch(log['epoch'], self.params['epochs'])
         self.send_optimizer_info(log['epoch'])
 
-        # if self.log_epoch:
-        #     # todo, multiple outputs
-        #     line = "Epoch %d: loss=%f, acc=%f, val_loss=%f, val_acc=%f\n" % (
-        #         log['epoch'], log['loss'], log.get('acc', 0), log.get('val_loss', 0), total_accuracy_validation,)
-        #     self.logger.write(line)
+    def send_metrics(self, log, x):
+        accuracy_log_name = 'acc'
+        val_accuracy_log_name = 'val_acc'
 
-        # if self.force_insights or self.job_model.insights_enabled:
-        #     # todo, support multiple inputs
-        #     first_input_layer = self.model.input_layers[0]
-        #
-        #     if first_input_layer is not None:
-        #         images = self.build_insight_images()
-        #         # build confusion matrix
-        #         confusion_matrix = self.build_confusion_matrix() if self.confusion_matrix else None
-        #
-        #         self.job_backend.job_add_insight(log['epoch'], images, confusion_matrix)
+        total_accuracy_validation = log.get(val_accuracy_log_name, None)
+        total_accuracy_training = log.get(accuracy_log_name, None)
+
+        loss = log.get('loss', None), log.get('val_loss', None)
+        if loss[0] is not None or loss[1] is not None:
+            self.loss_channel.send(x, loss[0], loss[1])
+
+        accuracy = [total_accuracy_training, total_accuracy_validation]
+        if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
+            accuracy = []
+            losses = []
+            for layer in self.model.output_layers:
+                accuracy.append(log.get(layer.name + '_acc', None))
+                accuracy.append(log.get('val_' + layer.name + '_acc', None))
+
+                losses.append(log.get(layer.name + '_loss', None))
+                losses.append(log.get('val_' + layer.name + '_loss', None))
+
+            self.all_losses.send(x, losses)
+
+        self.accuracy_channel.send(x, accuracy)
 
     def send_optimizer_info(self, epoch):
         self.learning_rate_channel.send(epoch, [self.learning_rate_start, self.get_learning_rate()])
 
     def get_learning_rate(self):
-
         if hasattr(self.model, 'optimizer'):
             config = self.model.optimizer.get_config()
 
@@ -495,111 +388,6 @@ class KerasCallback(Callback):
                 outputs.append(layer.get_output_at(idx))
 
         return outputs
-
-    def build_confusion_matrix(self):
-        confusion_matrix = {}
-
-        if self.data_validation_size is None:
-            return confusion_matrix
-
-        if len(self.model.output_layers) > 1:
-            return confusion_matrix
-
-        first_input_layer = self.model.input_layers[0]
-        first_output_layer = self.model.output_layers[0]
-
-        if 'Softmax' not in str(first_output_layer.output) or len(first_output_layer.output_shape) != 2:
-            return confusion_matrix
-
-        input_data_x = None
-        input_data_y = []
-
-        # It's dict of AETROS code generation
-        if isinstance(self.data_validation, dict) and 'x' in self.data_validation:
-
-            if is_generator(self.data_validation['x']):
-                # single input
-                input_data_x = self.data_validation['x']
-
-            elif isinstance(self.data_validation['x'], dict):
-                # multiple inputs named
-                input_data_x = self.data_validation['x'][first_input_layer.name]
-                input_data_y = self.data_validation['y'][first_output_layer.name]
-
-        # Not from AETROS code generation
-        else:
-            if is_generator(self.data_validation):
-                input_data_x = self.data_validation
-
-            elif isinstance(self.data_validation, dict):
-                if len(self.model.input_layers) > 1:
-                    input_data_x = []
-                    for layer in self.model.input_layers:
-                        input_data_x.append(self.data_validation[layer.name])
-
-                input_data_y = self.data_validation[first_output_layer.name]
-
-            elif isinstance(self.data_validation, tuple):
-                input_data_x = self.data_validation[0]
-                input_data_y = self.data_validation[1]
-
-        if input_data_x is None:
-            return confusion_matrix
-
-        matrix = np.zeros((first_output_layer.output_shape[1], first_output_layer.output_shape[1]))
-
-        if is_generator(input_data_x):
-            processed_samples = 0
-
-            while processed_samples < self.data_validation_size:
-                generator_output = next(input_data_x)
-                if len(generator_output) == 2:
-                    x, y = generator_output
-                    sample_weight = None
-                elif len(generator_output) == 3:
-                    x, y, sample_weight = generator_output
-                else:
-                    self.model._stop.set()
-                    raise Exception('output of generator should be a tuple '
-                                    '(x, y, sample_weight) '
-                                    'or (x, y). Found: ' + str(generator_output))
-
-                if type(x) is list:
-                    nb_samples = len(x[0])
-                elif type(x) is dict:
-                    nb_samples = len(list(x.values())[0])
-                else:
-                    nb_samples = len(x)
-
-                processed_samples += nb_samples
-
-                prediction = self.model.predict_on_batch(x)
-                predicted_classes = prediction.argmax(axis=-1)
-                expected_classes = y.argmax(axis=-1)
-
-                try:
-                    for sample_idx, predicted_class in enumerate(predicted_classes):
-                        expected_class = expected_classes[sample_idx]
-                        matrix[expected_class, predicted_class] += 1
-                except Exception:
-                    pass
-
-        else:
-            batch_size = self.current['batch_size'] if 'batch_size' in self.current else 16
-            prediction = self.model.predict(input_data_x, batch_size=batch_size)
-            predicted_classes = prediction.argmax(axis=-1)
-            expected_classes = np.array(input_data_y).argmax(axis=-1)
-
-            try:
-                for sample_idx, predicted_class in enumerate(predicted_classes):
-                    expected_class = expected_classes[sample_idx]
-                    matrix[expected_class, predicted_class] += 1
-            except Exception:
-                pass
-
-        confusion_matrix[first_output_layer.name] = matrix.tolist()
-
-        return confusion_matrix
 
     def filter_invalid_json_values(self, dict):
         for k, v in six.iteritems(dict):
