@@ -91,11 +91,10 @@ class KerasCallback(Callback):
         self.current = {}
         self.last_batch_time = time.time()
         self.start_time = time.time()
-        self.kpi_channel = None
-        self.accuracy_channel = None
+        self.accuracy_metric = None
         self.all_losses = None
-        self.loss_channel = None
-        self.learning_rate_channel = None
+        self.loss_metric = None
+        self.learning_rate_metric = None
 
         self.learning_rate_start = 0
 
@@ -109,11 +108,12 @@ class KerasCallback(Callback):
         deepkit.set_status('TRAINING')
         deepkit.set_info('parameters', get_total_params(self.model))
         deepkit.set_info('backend', K.backend())
-        deepkit.set_info('Keras version', keras.__version__)
-        deepkit.set_info('Keras floatx', K.floatx())
+        deepkit.set_info('keras.version', keras.__version__)
+        deepkit.set_info('keras.floatx', K.floatx())
+        deepkit.set_info('tf.version', keras.__version__)
 
         if hasattr(K, 'image_dim_ordering'):
-            deepkit.set_info('Keras image_data_format', K.image_dim_ordering())
+            deepkit.set_info('keras.format', K.image_dim_ordering())
 
         # self.job_backend.upload_keras_graph(self.model)
 
@@ -146,16 +146,12 @@ class KerasCallback(Callback):
                 traces.append('train_' + output.name)
                 traces.append('val_' + output.name)
 
-        # is_accuracy_kpi = True if self.job_backend.kpi_channel is None else False
-        is_accuracy_kpi = True
-
-        self.accuracy_channel = deepkit.create_channel(
+        self.accuracy_metric = deepkit.create_metric(
             'accuracy',
-            main=True, traces=traces, kpi=is_accuracy_kpi, kpiTrace=1,
-            max_optimization=True, xaxis=xaxis, yaxis=yaxis
+            main=True, traces=traces, xaxis=xaxis, yaxis=yaxis
         )
-        self.loss_channel = deepkit.create_loss_channel('loss', xaxis=xaxis)
-        self.learning_rate_channel = deepkit.create_channel('learning rate', traces=['start', 'end'], xaxis=xaxis)
+        self.loss_metric = deepkit.create_loss_metric('loss', xaxis=xaxis)
+        self.learning_rate_metric = deepkit.create_metric('learning rate', traces=['start', 'end'], xaxis=xaxis)
 
         deepkit.epoch(0, self.params['epochs'])
         if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
@@ -164,7 +160,7 @@ class KerasCallback(Callback):
                 loss_traces.append('train_' + output.name)
                 loss_traces.append('val_' + output.name)
 
-            self.all_losses = deepkit.create_channel('All loss', main=True, xaxis=xaxis, traces=loss_traces)
+            self.all_losses = deepkit.create_metric('loss_all', main=True, xaxis=xaxis, traces=loss_traces)
 
         # if self.force_insights or self.job_model.insights_enabled:
         #     images = self.build_insight_images()
@@ -216,7 +212,7 @@ class KerasCallback(Callback):
 
         loss = log.get('loss', None), log.get('val_loss', None)
         if loss[0] is not None or loss[1] is not None:
-            self.loss_channel.send(x, loss[0], loss[1])
+            self.loss_metric.send(x, loss[0], loss[1])
 
         accuracy = [total_accuracy_training, total_accuracy_validation]
         if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
@@ -231,10 +227,10 @@ class KerasCallback(Callback):
 
             self.all_losses.send(x, losses)
 
-        self.accuracy_channel.send(x, accuracy)
+        self.accuracy_metric.send(x, accuracy)
 
     def send_optimizer_info(self, epoch):
-        self.learning_rate_channel.send(epoch, [self.learning_rate_start, self.get_learning_rate()])
+        self.learning_rate_metric.send(epoch, [self.learning_rate_start, self.get_learning_rate()])
 
     def get_learning_rate(self):
         if hasattr(self.model, 'optimizer'):

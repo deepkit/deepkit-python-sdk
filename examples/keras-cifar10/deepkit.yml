@@ -14,16 +14,19 @@ docker:
 
 install_files:
     - requirements.txt
-      
-#resources:
-#    cpu: 2
-#    memory: 2
+
+
+output: saved_models
+
+resources:
+    cpu: 4
+    memory: 4
 
 parameters:
     lr: 0.8
     batch_size: 128
-    epochs: 8
-    train_samples: 15000
-    test_samples: 15000
+    epochs: 5
+    train_samples: 10000
+    test_samples: 10000
 
 command: ls -al && python model.py

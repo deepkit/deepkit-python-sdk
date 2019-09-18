@@ -1,4 +1,4 @@
-keras
+keras>2.0.0,<=2.2.5
 tensorflow-gpu
 image
 deepkit

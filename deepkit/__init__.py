@@ -94,49 +94,34 @@ def set_info(name, value):
     stdout_api_call('info', name=name, value=value)
 
 
-class JobChannel:
-    NUMBER = 'number'
-    TEXT = 'text'
-
+class JobMetric:
     """
     :type job_backend: JobBackend
     """
 
     def __init__(self, name, traces=None,
-                 main=False, kpi=False, kpiTrace=0, max_optimization=True,
-                 type=None, xaxis=None, yaxis=None, layout=None):
+                 main=False, xaxis=None, yaxis=None, layout=None):
         """
         :param name: str
         :param traces: None|list : per default create a trace based on "name".
-        :param main: bool : whether this channel is visible in the job list as column for better comparison.
-        :param kpi: bool : whether this channel is the KPI (key performance indicator).
-                           Used for hyperparameter optimization. Only one channel can be a kpi. Only first trace used.
-        :param kpiTrace: bool : if you have multiple traces, define which is the KPI. 0 based index.
-        :param max_optimization: bool : whether the optimization maximizes or minmizes the kpi . Use max_optimization=False to
-                                        tell the optimization algorithm that his channel minimizes a kpi, for instance the loss of a model.
-        :param type: str : One of JobChannel.NUMBER, JobChannel.TEXT, JobChannel.IMAGE
+        :param main: bool : whether this metric is visible in the job view per default.
         :param xaxis: dict
         :param yaxis: dict
         :param layout: dict
         """
         self.name = name
-        self.kpi = kpi
-        self.kpiTrace = kpiTrace
 
         if not (isinstance(traces, list) or traces is None):
             raise Exception(
                 'traces can only be None or a list of strings: [name1, name2]')
 
         if not traces:
-            traces = [name]
+            traces = []
 
         message = {
             'name': name,
             'traces': traces,
             'main': main,
-            'kpi': kpi,
-            'kpiTrace': kpiTrace,
-            'maxOptimization': max_optimization,
             'xaxis': xaxis,
             'yaxis': yaxis,
             'layout': layout,
@@ -151,12 +136,12 @@ class JobChannel:
 
         if len(y) != len(self.traces):
             raise Exception(
-                'You tried to set more y values (%d items) then traces available in channel %s (%d traces).' % (
+                'You tried to set more y values (%d items) then traces available in metric %s (%d traces).' % (
                     len(y), self.name, len(self.traces)))
 
         for v in y:
             if not isinstance(v, (int, float)) and v is not None and not isinstance(v, six.string_types):
-                raise Exception('Could not send channel value for ' + self.name + ' since type ' + type(
+                raise Exception('Could not send metric value for ' + self.name + ' since type ' + type(
                     y).__name__ + ' is not supported. Use int, float or string values.')
 
         stdout_api_call('channel', **{
@@ -167,7 +152,7 @@ class JobChannel:
         })
 
 
-class JobLossChannel:
+class JobLossMetric:
     """
     :type job_backend : JobBackend
     """
@@ -195,34 +180,26 @@ class JobLossChannel:
         })
 
 
-def create_loss_channel(name='loss', xaxis=None, yaxis=None, layout=None):
+def create_loss_metric(name='loss', xaxis=None, yaxis=None, layout=None):
     """
     :param name: string
     :return: JobLossGraph
     """
 
-    return JobLossChannel(name, xaxis, yaxis, layout)
+    return JobLossMetric(name, xaxis, yaxis, layout)
 
 
-def create_channel(name, traces=None,
-                   main=False, kpi=False, kpiTrace=0, max_optimization=True,
-                   type=JobChannel.NUMBER,
-                   xaxis=None, yaxis=None, layout=None):
+def create_metric(name, traces=None,
+                  main=False, xaxis=None, yaxis=None, layout=None):
     """
     :param name: str
     :param traces: None|list : per default create a trace based on "name".
-    :param main: bool : whether this channel is visible in the job list as column for better comparison.
-    :param kpi: bool : whether this channel is the KPI (key performance indicator).
-                       Used for hyperparameter optimization. Only one channel can be a kpi. Only first trace used.
-    :param kpiTrace: bool : if you have multiple traces, define which is the KPI. 0 based index.
-    :param max_optimization: bool : whether the optimization maximizes or minmizes the kpi. Use max_optimization=False to
-                                    tell the optimization algorithm that his channel minimizes a kpi, for instance the loss of a model.
-    :param type: str : One of JobChannel.NUMBER, JobChannel.TEXT
+        :param main: bool : whether this metric is visible in the job view per default.
     :param xaxis: dict
     :param yaxis: dict
     :param layout: dict
     """
-    return JobChannel(name, traces, main, kpi, kpiTrace, max_optimization, type, xaxis, yaxis, layout)
+    return JobMetric(name, traces, main, xaxis, yaxis, layout)
 
 
 def create_keras_callback(model,
