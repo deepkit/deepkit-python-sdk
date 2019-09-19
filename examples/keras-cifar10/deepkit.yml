@@ -6,11 +6,11 @@ install:
     - python -c 'from keras.datasets import cifar10; cifar10.load_data()'
 
 
-docker:
-    binds:
-        - "/Users/marc/bude/deepkit-python-sdk/:/deepkit-sdk"
-    env:
-        - PYTHONPATH=/deepkit-sdk
+#docker:
+#    binds:
+#        - "/Users/marc/bude/deepkit-python-sdk/:/deepkit-sdk"
+#    env:
+#        - PYTHONPATH=/deepkit-sdk
 
 install_files:
     - requirements.txt
