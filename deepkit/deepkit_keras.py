@@ -110,7 +110,6 @@ class KerasCallback(Callback):
         deepkit.set_info('backend', K.backend())
         deepkit.set_info('keras.version', keras.__version__)
         deepkit.set_info('keras.floatx', K.floatx())
-        deepkit.set_info('tf.version', keras.__version__)
 
         if hasattr(K, 'image_dim_ordering'):
             deepkit.set_info('keras.format', K.image_dim_ordering())
