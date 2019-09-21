@@ -15,7 +15,6 @@ install:
 install_files:
     - requirements.txt
 
-
 output: saved_models
 
 resources:
@@ -25,8 +24,8 @@ resources:
 parameters:
     lr: 0.8
     batch_size: 128
-    epochs: 5
-    train_samples: 10000
+    epochs: 50
+    train_samples: 60000
     test_samples: 10000
 
 command: ls -al && python model.py
