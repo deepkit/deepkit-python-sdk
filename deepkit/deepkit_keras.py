@@ -139,7 +139,7 @@ class KerasCallback(Callback):
         }
 
         traces = ['training', 'validation']
-        if hasattr(self.model, 'output_layers') and len(self.model.output_layers263) > 1:
+        if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
             traces = []
             for output in self.model.output_layers:
                 traces.append('train_' + output.name)

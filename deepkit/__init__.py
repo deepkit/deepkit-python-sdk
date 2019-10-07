@@ -7,14 +7,12 @@ import json
 from collections import OrderedDict
 from deepkit.utils import get_parameter_by_path
 
-start_time = time.time()
-
 loaded_job = None
 
 
 def stdout_api_call(command, **kwargs):
     action = OrderedDict()
-    action['deepkit'] = command;
+    action['deepkit'] = command
     action.update(kwargs)
     sys.stdout.flush()
     sys.stdout.write(simplejson.dumps(action) + '\n')
@@ -75,11 +73,6 @@ def floatparam(path, default=None):
 def param(path, default=None):
     v = get_parameter(path, None)
     return v if v is not None else default
-
-
-def get_run_time(precision=3):
-    global start_time
-    return round(time.time() - start_time, precision)
 
 
 def epoch(epoch, total=None):
@@ -146,7 +139,7 @@ class JobMetric:
 
         stdout_api_call('channel', **{
             'name': self.name,
-            'time': get_run_time(),
+            'time': time.time(),
             'x': x,
             'y': y
         })
@@ -174,7 +167,7 @@ class JobLossMetric:
     def send(self, x, training, validation):
         stdout_api_call('channel', **{
             'name': self.name,
-            'time': get_run_time(),
+            'time': time.time(),
             'x': x,
             'y': [training, validation]
         })
