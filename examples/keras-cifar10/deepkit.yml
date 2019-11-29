@@ -1,5 +1,5 @@
 label: Cifar10 Partial
-image: tensorflow/tensorflow:latest-gpu
+image: tensorflow/tensorflow:latest-gpu-py3
 install:
     - pip install --upgrade pip
     - pip install -r requirements.txt

@@ -3,3 +3,5 @@ tensorflow-gpu<=1.14.0
 image
 deepkit
 simplejson
+websockets>=8.1
+rx>=1.5

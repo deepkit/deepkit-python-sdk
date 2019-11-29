@@ -1,54 +1,85 @@
-import simplejson as simplejson
-import six
-import sys
-import time
-import os
+from __future__ import annotations
+
 import json
-from collections import OrderedDict
+import os
+import sys
+
+import six
+
+import deepkit.globals
+from deepkit.client import Client
+from deepkit.context import Context
 from deepkit.utils import get_parameter_by_path
 
-loaded_job = None
+
+def log(s):
+    if deepkit.globals.last_context:
+        deepkit.globals.last_context.log(s)
+    else:
+        deepkit.globals.last_logs.write(s)
 
 
-def stdout_api_call(command, **kwargs):
-    action = OrderedDict()
-    action['deepkit'] = command
-    action.update(kwargs)
-    sys.stdout.flush()
-    sys.stdout.write(simplejson.dumps(action) + '\n')
-    sys.stdout.flush()
+def context(config_path: str = None) -> Context:
+    if deepkit.globals.last_context:
+        return deepkit.globals.last_context
+
+    context = Context(config_path)
+    context.wait_for_connect()
+
+    return context
+
+
+if 'DEEPKIT_JOB_ACCESSTOKEN' not in os.environ:
+    class StdHook:
+        def __init__(self, s):
+            self.s = s
+
+        def fileno(self):
+            return self.s.fileno()
+
+        def isatty(self):
+            return self.s.isatty()
+
+        def flush(self):
+            self.s.flush()
+
+        def write(self, s):
+            self.s.write(s)
+            log(s)
+
+
+    sys.stdout = StdHook(sys.__stdout__)
+    sys.stderr = StdHook(sys.__stderr__)
 
 
 def batch(current, total=None, size=None):
-    stdout_api_call('batch', current=current, total=total, size=size)
+    context().step(current, total, size)
 
 
 def step(current, total=None):
-    stdout_api_call('batch', current=current, total=total)
+    context().step(current, total)
 
 
 def get_job():
-    global loaded_job
-
-    if loaded_job is None:
+    if deepkit.globals.loaded_job is None:
         cwd = os.getcwd()
         job_file = os.path.join(cwd, '.deepkit', 'job.json')
         if os.path.exists(job_file):
             with open(job_file) as file:
-                loaded_job = json.load(file)
+                deepkit.globals.loaded_job = json.load(file)
 
         else:
-            loaded_job = {
+            deepkit.globals.loaded_job = {
                 'config': {
                     'parameters': {}
                 }
             }
 
-    return loaded_job
+    return deepkit.globals.loaded_job
 
 
 def parameter(path, value):
-    stdout_api_call('parameter', path=path, value=value)
+    context().set_parameter(path, value)
 
 
 def get_parameter(path, default=None):
@@ -76,15 +107,19 @@ def param(path, default=None):
 
 
 def epoch(epoch, total=None):
-    stdout_api_call('epoch', epoch=epoch, total=total)
+    context().epoch(epoch, total)
 
 
-def set_status(status):
-    stdout_api_call('status', status=status)
+def set_title(s):
+    context().set_title(s)
 
 
 def set_info(name, value):
-    stdout_api_call('info', name=name, value=value)
+    context().set_info(name, value)
+
+
+def set_parameter(name, value):
+    context().set_parameter(name, value)
 
 
 class JobMetric:
@@ -109,10 +144,9 @@ class JobMetric:
                 'traces can only be None or a list of strings: [name1, name2]')
 
         if not traces:
-            traces = []
+            traces = [name]
 
-        message = {
-            'name': name,
+        options = {
             'traces': traces,
             'main': main,
             'xaxis': xaxis,
@@ -121,7 +155,7 @@ class JobMetric:
         }
 
         self.traces = traces
-        stdout_api_call('create-channel', **message)
+        context().define_metric(name, options)
 
     def send(self, x, y):
         if not isinstance(y, list):
@@ -137,12 +171,7 @@ class JobMetric:
                 raise Exception('Could not send metric value for ' + self.name + ' since type ' + type(
                     y).__name__ + ' is not supported. Use int, float or string values.')
 
-        stdout_api_call('channel', **{
-            'name': self.name,
-            'time': time.time(),
-            'x': x,
-            'y': y
-        })
+        context().metric(self.name, x, y)
 
 
 class JobLossMetric:
@@ -152,8 +181,7 @@ class JobLossMetric:
 
     def __init__(self, name, xaxis=None, yaxis=None, layout=None):
         self.name = name
-        message = {
-            'name': self.name,
+        options = {
             'traces': ['training', 'validation'],
             'main': True,
             'xaxis': xaxis,
@@ -162,15 +190,10 @@ class JobLossMetric:
             'lossChannel': True
         }
 
-        stdout_api_call('create-channel', **message)
+        context().define_metric(name, options)
 
     def send(self, x, training, validation):
-        stdout_api_call('channel', **{
-            'name': self.name,
-            'time': time.time(),
-            'x': x,
-            'y': [training, validation]
-        })
+        context().metric(self.name, x, [training, validation])
 
 
 def create_loss_metric(name='loss', xaxis=None, yaxis=None, layout=None):

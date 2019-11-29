@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import division
+
 import os
 import time
+
 try:
     from cStringIO import StringIO
 except ImportError:
@@ -17,7 +19,7 @@ import keras.layers.convolutional
 
 import numpy as np
 
-from deepkit.utils.image import get_layer_vis_square, get_layer_vis_square_raw, get_image_tales
+from deepkit.utils.image import get_layer_vis_square, get_image_tales
 import six
 
 
@@ -105,7 +107,7 @@ class KerasCallback(Callback):
         self.start_time = time.time()
         self.last_batch_time = time.time()
 
-        deepkit.set_status('TRAINING')
+        deepkit.epoch(0, self.params['epochs'])
         deepkit.set_info('parameters', get_total_params(self.model))
         deepkit.set_info('backend', K.backend())
         deepkit.set_info('keras.version', keras.__version__)
@@ -186,7 +188,7 @@ class KerasCallback(Callback):
         deepkit.batch(batch + 1, self.current['nb_batches'], logs['size'])
 
     def on_epoch_begin(self, epoch, logs={}):
-        self.epoch = epoch;
+        self.epoch = epoch
         self.learning_rate_start = self.get_learning_rate()
 
     def on_epoch_end(self, epoch, logs={}):

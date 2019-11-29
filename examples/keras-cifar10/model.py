@@ -14,6 +14,8 @@ import os
 
 import deepkit
 
+deepkit.context('deepkit.yml')
+
 batch_size = deepkit.intparam('batch_size')
 num_classes = 10
 epochs = deepkit.intparam('epochs')
