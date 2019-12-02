@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import atexit
 import time
+import signal
+import os
 from threading import Lock
 from typing import Optional, List
 
@@ -14,17 +16,48 @@ import deepkit.client
 import deepkit.globals
 
 
+def pytorch_graph():
+    # see https://discuss.pytorch.org/t/print-autograd-graph/692/18
+    # https://github.com/szagoruyko/pytorchviz
+    pass
+
+
+class JobController:
+    def stop(self):
+        """
+        Raising the SIGINT signal in the current process and all sub-processes.
+        os.kill() only issues a signal in the current process (without subprocesses).
+        CTRL+C on the console sends the signal to the process group (which we need).
+        """
+        if hasattr(signal, 'CTRL_C_EVENT'):
+            # windows. Need CTRL_C_EVENT to raise the signal in the whole process group
+            os.kill(os.getpid(), signal.CTRL_C_EVENT)
+        else:
+            # unix.
+            pgid = os.getpgid(os.getpid())
+            if pgid == 1:
+                os.kill(os.getpid(), signal.SIGINT)
+            else:
+                os.killpg(os.getpgid(os.getpid()), signal.SIGINT)
+
+
 class Context:
     def __init__(self, config_path: str):
         deepkit.globals.last_context = self
-        self.config_path = config_path
         self.log_lock = Lock()
         self.defined_metrics = {}
         self.log_subject = Subject()
         self.metric_subject = Subject()
 
         self.client = deepkit.client.Client(config_path)
+        self.wait_for_connect()
         atexit.register(self.shutdown)
+
+        self.job_controller = JobController()
+        asyncio.run_coroutine_threadsafe(
+            self.client.register_controller('job/' + self.client.job_id, self.job_controller),
+            self.client.loop
+        ).result()
 
         def on_log(data: List):
             packed = ''
@@ -69,11 +102,14 @@ class Context:
 
     def iteration(self, current: int, total: Optional[int]):
         self.client.patch('iteration', current)
+        # todo, calculate ETA
         if total:
             self.client.patch('iterations', total)
 
     def step(self, current: int, total: int = None, size: int = None):
         self.client.patch('step', current)
+        # todo, calculate ETA
+        # todo, calculate speed
         if total:
             self.client.patch('steps', total)
 
@@ -89,6 +125,9 @@ class Context:
     def define_metric(self, name: str, options: dict):
         self.defined_metrics[name] = {}
         self.client.job_action('defineMetric', [name, options])
+
+    def debug_snapshot(self, graph: dict):
+        self.client.job_action('debugSnapshot', [graph])
 
     def metric(self, name: str, x, y):
         if name not in self.defined_metrics:

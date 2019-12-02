@@ -24,7 +24,6 @@ def context(config_path: str = None) -> Context:
         return deepkit.globals.last_context
 
     context = Context(config_path)
-    context.wait_for_connect()
 
     return context
 

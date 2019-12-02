@@ -16,6 +16,7 @@ setup(name='deepkit',
                         'cherrypy>=7.1.0',
                         'six>=1.11.0',
                         'Pillow>=4.0.0',
+                        'rx>=1.5',
                         'PyYAML>=5.0.0',
                         'websockets>=7.0',
                         'simplejson>=3.13.2']

@@ -9,6 +9,7 @@ from typing import Dict, List
 import websockets
 
 import deepkit.globals
+import inspect
 
 
 def is_in_directory(filepath, directory):
@@ -28,8 +29,10 @@ class Client(threading.Thread):
         self.message_id = 0
         self.account = 'localhost'
         self.callbacks: Dict[int, asyncio.Future] = {}
+        self.subscriber: Dict[int, any] = {}
         self.stopping = False
         self.queue = []
+        self.controllers = {}
         self.patches = {}
         self.offline = False
         self.loop = asyncio.new_event_loop()
@@ -43,6 +46,10 @@ class Client(threading.Thread):
     def run(self):
         self.loop.create_task(self._connect())
         self.loop.run_forever()
+
+    def wait_for_connect(self):
+        promise = asyncio.run_coroutine_threadsafe(self.stop_and_sync(), self.loop)
+        promise.result()
 
     def shutdown(self):
         if self.offline: return
@@ -84,6 +91,92 @@ class Client(threading.Thread):
 
         await self.connection.close()
 
+    async def register_controller(self, name: str, controller):
+        self.controllers[name] = controller
+
+        async def subscriber(message, done):
+            if message['type'] == 'error':
+                done()
+                del self.controllers[name]
+                raise Exception('Register controller error: ' + message['error'])
+
+            if message['type'] == 'ack':
+                pass
+
+            if message['type'] == 'peerController/message':
+                data = message['data']
+                if not hasattr(controller, data['action']):
+                    error = f"Requested action {message['action']} not available in {name}"
+                    print(error, file=sys.stderr)
+                    await self._message({
+                        'name': 'peerController/message',
+                        'controllerName': name,
+                        'replyId': message['replyId'],
+                        'data': {'type': 'error', 'id': 0, 'stack': None, 'entityName': '@error:default',
+                                 'error': error}
+                    }, no_response=True)
+
+                if data['name'] == 'actionTypes':
+                    parameters = []
+                    for arg in inspect.getfullargspec(getattr(controller, data['action'])).args:
+                        parameters.append({
+                            'type': 'Any',
+                            'array': False,
+                            'partial': False
+                        })
+
+                    await self._message({
+                        'name': 'peerController/message',
+                        'controllerName': name,
+                        'replyId': message['replyId'],
+                        'data': {
+                            'type': 'actionTypes/result',
+                            'id': 0,
+                            'parameters': parameters,
+                            'returnType': {'partial': False, 'type': 'Any', 'array': False}
+                        }
+                    }, no_response=True)
+
+                if data['name'] == 'action':
+                    try:
+                        res = getattr(controller, data['action'])(*data['args'])
+
+                        await self._message({
+                            'name': 'peerController/message',
+                            'controllerName': name,
+                            'replyId': message['replyId'],
+                            'data': {
+                                'type': 'next/json',
+                                'id': message['id'],
+                                'next': res,
+                            }
+                        }, no_response=True)
+                    except Exception as e:
+                        await self._message({
+                            'name': 'peerController/message',
+                            'controllerName': name,
+                            'replyId': message['replyId'],
+                            'data': {'type': 'error', 'id': 0, 'stack': None, 'entityName': '@error:default',
+                                     'error': str(e)}
+                        }, no_response=True)
+
+        await self._subscribe({
+            'name': 'peerController/register',
+            'controllerName': name,
+        }, subscriber)
+
+        class Controller:
+            def __init__(self, client):
+                self.client = client
+
+            def stop(self):
+                self.client._message({
+                    'name': 'peerController/unregister',
+                    'controllerName': name,
+                })
+
+        return Controller(self)
+
     async def _action(self, controller: str, action: str, args: List, lock=True):
         if self.offline: return
         if lock: await self.connecting
@@ -108,14 +201,36 @@ class Client(threading.Thread):
         if self.offline: return
         return asyncio.run_coroutine_threadsafe(self._action('job', action, args), self.loop)
 
-    async def _message(self, message, lock=True):
+    async def _subscribe(self, message, subscriber):
+        await self.connecting
+
+        self.message_id += 1
+        message['id'] = self.message_id
+
+        message_id = self.message_id
+
+        def on_done():
+            del self.subscriber[message_id]
+
+        async def on_incoming_message(incoming_message):
+            await subscriber(incoming_message, on_done)
+
+        self.subscriber[self.message_id] = on_incoming_message
+        self.queue.append(message)
+
+    async def _message(self, message, lock=True, no_response=False):
         if lock:
             await self.connecting
 
         self.message_id += 1
         message['id'] = self.message_id
-        self.callbacks[self.message_id] = self.loop.create_future()
+        if not no_response:
+            self.callbacks[self.message_id] = self.loop.create_future()
+
         self.queue.append(message)
+
+        if no_response:
+            return
 
         return await self.callbacks[self.message_id]
 
@@ -155,7 +270,6 @@ class Client(threading.Thread):
                 except websockets.exceptions.ConnectionClosed:
                     return
 
-
             await asyncio.sleep(0.25)
 
     async def handle_messages(self, connection):
@@ -170,11 +284,13 @@ class Client(threading.Thread):
                 return
 
             if res and 'id' in res:
-                if res['id'] not in self.callbacks:
-                    sys.stderr.write(f"proto error: not callback with id {res['id']}")
 
-                self.callbacks[res['id']].set_result(res)
-                del self.callbacks[res['id']]
+                if res['id'] in self.subscriber:
+                    await self.subscriber[res['id']](res)
+
+                if res['id'] in self.callbacks:
+                    self.callbacks[res['id']].set_result(res)
+                    del self.callbacks[res['id']]
 
         if not self.stopping:
             print("Deepkit: lost connection. reconnect ...")
@@ -248,7 +364,7 @@ class Client(threading.Thread):
             link = self.get_folder_link()
 
             deepkit_config_yaml = None
-            if os.path.exists(self.config_path):
+            if self.config_path and os.path.exists(self.config_path):
                 deepkit_config_yaml = open(self.config_path, 'r', encoding='utf-8').read()
 
             job = await self._action('app', 'createJob', [link['projectId'], deepkit_config_yaml], lock=False)
