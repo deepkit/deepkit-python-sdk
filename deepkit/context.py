@@ -23,6 +23,18 @@ def pytorch_graph():
 
 
 class JobController:
+    def __init__(self):
+        self.watching_layers = {}
+
+    def debugStopWatchLayer(self, id: str):
+        print("Monitor stop", id)
+        if id in self.watching_layers:
+            del self.watching_layers[id]
+
+    def debugStartWatchLayer(self, id: str):
+        print("Monitor start", id)
+        self.watching_layers[id] = True
+
     def stop(self):
         """
         Raising the SIGINT signal in the current process and all sub-processes.
@@ -48,10 +60,18 @@ class Context:
         self.defined_metrics = {}
         self.log_subject = Subject()
         self.metric_subject = Subject()
+        self.speed_report_subject = Subject()
 
         self.client = deepkit.client.Client(config_path)
         self.wait_for_connect()
         atexit.register(self.shutdown)
+
+        self.last_iteration_time = 0
+        self.last_batch_time = 0
+        self.job_iteration = 0
+        self.job_iterations = 0
+        self.seconds_per_iteration = 0
+        self.seconds_per_iterations = []
 
         self.job_controller = JobController()
         asyncio.run_coroutine_threadsafe(
@@ -60,6 +80,7 @@ class Context:
         ).result()
 
         def on_log(data: List):
+            if len(data) == 0: return
             packed = ''
             for d in data:
                 packed += d
@@ -72,6 +93,7 @@ class Context:
             self.log_subject.on_next(deepkit.globals.last_logs.getvalue())
 
         def on_metric(data: List):
+            if len(data) == 0: return
             packed = {}
 
             for d in data:
@@ -84,6 +106,13 @@ class Context:
                 self.client.job_action('channelData', [i, v])
 
         self.metric_subject.pipe(buffer(interval(1))).subscribe(on_metric)
+
+        def on_speed_report(rows):
+            # only save latest value, each second
+            if len(rows) == 0: return
+            self.client.job_action('streamJsonFile', ['.deepkit/speed.csv', [rows[-1]]])
+
+        self.speed_report_subject.pipe(buffer(interval(1))).subscribe(on_speed_report)
 
     def wait_for_connect(self):
         async def wait():
@@ -101,15 +130,73 @@ class Context:
         self.iteration(current, total)
 
     def iteration(self, current: int, total: Optional[int]):
-        self.client.patch('iteration', current)
-        # todo, calculate ETA
+        self.job_iteration = current
         if total:
-            self.client.patch('iterations', total)
+            self.job_iterations = total
+
+        now = time.time()
+        if self.last_iteration_time:
+            self.seconds_per_iterations.append({
+                'diff': now - self.last_iteration_time,
+                'when': now,
+            })
+
+        self.last_iteration_time = now
+        self.last_batch_time = now
+
+        # remove all older than twenty seconds
+        self.seconds_per_iterations = [x for x in self.seconds_per_iterations if (now - x['when']) < 20]
+        self.seconds_per_iterations = self.seconds_per_iterations[-30:]
+
+        if len(self.seconds_per_iterations) > 0:
+            diffs = [x['diff'] for x in self.seconds_per_iterations]
+            self.seconds_per_iteration = sum(diffs) / len(diffs)
+
+        if self.seconds_per_iteration:
+            self.client.patch('secondsPerIteration', self.seconds_per_iteration)
+
+        self.client.patch('iteration', self.job_iteration)
+        if total:
+            self.client.patch('iterations', self.job_iterations)
+
+        iterations_left = self.job_iterations - self.job_iteration
+        if iterations_left > 0:
+            self.client.patch('eta', self.seconds_per_iteration * iterations_left)
+        else:
+            self.client.patch('eta', 0)
 
     def step(self, current: int, total: int = None, size: int = None):
         self.client.patch('step', current)
-        # todo, calculate ETA
-        # todo, calculate speed
+        now = time.time()
+
+        x = self.job_iteration + (current / total)
+        speed_per_second = size / (now - self.last_batch_time) if self.last_batch_time else size
+
+        if self.last_batch_time:
+            self.seconds_per_iterations.append({
+                'diff': (now - self.last_batch_time) * total,
+                'when': now
+            })
+
+        # remove all older than twenty seconds
+        self.seconds_per_iterations = [x for x in self.seconds_per_iterations if (now - x['when']) < 20]
+        self.seconds_per_iterations = self.seconds_per_iterations[-30:]
+
+        if len(self.seconds_per_iterations) > 0:
+            diffs = [x['diff'] for x in self.seconds_per_iterations]
+            self.seconds_per_iteration = sum(diffs) / len(diffs)
+
+            iterations_left = self.job_iterations - self.job_iteration
+            self.client.patch('eta', self.seconds_per_iteration * iterations_left)
+
+        self.last_batch_time = now
+
+        if self.seconds_per_iteration:
+            self.client.patch('secondsPerIteration', self.seconds_per_iteration)
+
+        self.client.patch('speed', speed_per_second)
+        self.speed_report_subject.on_next([x, now, speed_per_second])
+
         if total:
             self.client.patch('steps', total)
 
@@ -128,6 +215,9 @@ class Context:
 
     def debug_snapshot(self, graph: dict):
         self.client.job_action('debugSnapshot', [graph])
+
+    def set_model_graph(self, graph: dict):
+        self.client.patch('modelGraph', graph)
 
     def metric(self, name: str, x, y):
         if name not in self.defined_metrics:

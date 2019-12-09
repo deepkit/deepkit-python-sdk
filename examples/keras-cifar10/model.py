@@ -13,7 +13,6 @@ from keras.layers import Conv2D, MaxPooling2D
 import os
 
 import deepkit
-
 deepkit.context('deepkit.yml')
 
 batch_size = deepkit.intparam('batch_size')

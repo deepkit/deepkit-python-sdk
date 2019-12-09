@@ -69,9 +69,9 @@ class Client(threading.Thread):
         # failed = 250, //when at least one task failed
         # crashed = 300, //when at least one task crashed
         self.patches['status'] = 150
-        self.patches['ended'] = time.time()
+        self.patches['ended'] = time.time() * 1000
 
-        self.patches['tasks.main.ended'] = time.time()
+        self.patches['tasks.main.ended'] = time.time() * 1000
 
         # done = 500,
         # aborted = 550,
@@ -79,7 +79,7 @@ class Client(threading.Thread):
         # crashed = 650,
         self.patches['tasks.main.status'] = 500
 
-        self.patches['tasks.main.instances.0.ended'] = time.time()
+        self.patches['tasks.main.instances.0.ended'] = time.time() * 1000
         # done = 500,
         # aborted = 550,
         # failed = 600,

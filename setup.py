@@ -18,6 +18,7 @@ setup(name='deepkit',
                         'Pillow>=4.0.0',
                         'rx>=1.5',
                         'PyYAML>=5.0.0',
+                        'psutil>=5.4.6',
                         'websockets>=7.0',
                         'simplejson>=3.13.2']
 )

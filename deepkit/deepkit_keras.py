@@ -1,26 +1,20 @@
 # -*- coding: utf-8 -*-
 from __future__ import division
 
+import base64
+import math
 import os
 import time
 
-try:
-    from cStringIO import StringIO
-except ImportError:
-    from io import StringIO
-
 import PIL.Image
-import math
-import deepkit
-from keras.callbacks import Callback
-from keras import backend as K
-
-import keras.layers.convolutional
-
 import numpy as np
-
-from deepkit.utils.image import get_layer_vis_square, get_image_tales
 import six
+import tensorflow.keras as keras
+from tensorflow.keras import Model
+
+import deepkit
+from deepkit.tf import extract_model_graph
+from deepkit.utils.image import get_image_tales, get_layer_vis_square
 
 
 def is_generator(obj):
@@ -52,17 +46,6 @@ def get_total_params(model):
     return total_params
 
 
-# compatibility with keras 1.x
-def image_data_format():
-    if hasattr(K, 'image_data_format'):
-        return K.image_data_format()
-
-    if K.image_dim_ordering() == 'th':
-        return 'channel_first'
-    else:
-        return 'channel_last'
-
-
 class JobImage:
     def __init__(self, name, pil_image, label=None, pos=None):
         self.id = name
@@ -77,13 +60,14 @@ class JobImage:
             self.pos = time.time()
 
 
-class KerasCallback(Callback):
-    def __init__(self, model):
+class KerasCallback(keras.callbacks.Callback):
+    def __init__(self, model, debug_x=None):
         super(KerasCallback, self).__init__()
-        self.validation_per_batch = []
 
         self.model = model
-        self.insight_layer = []
+        self.context = deepkit.context()
+
+        self.debug_x = debug_x
 
         self.epoch = 0
 
@@ -99,9 +83,68 @@ class KerasCallback(Callback):
         self.learning_rate_metric = None
 
         self.learning_rate_start = 0
+        self.context.set_model_graph(extract_model_graph(model))
+        self.last_debug_sent = 0
 
-    def add_insight_layer(self, layer):
-        self.insight_layer.append(layer)
+    def send_debug_data(self):
+        if len(self.context.job_controller.watching_layers) == 0: return
+
+        if self.last_debug_sent and (time.time() - self.last_debug_sent) < 1:
+            return
+
+        for layer_name in self.context.job_controller.watching_layers.copy():
+            layer = self.model.get_layer(layer_name)
+            model = Model(self.model.input, layer.output)
+            y = model.predict(self.debug_x)
+            data = y[0]  # we pick only the first in the batch
+
+            if isinstance(layer, (
+                    keras.layers.Conv2D,
+                    keras.layers.UpSampling2D,
+                    keras.layers.MaxPooling2D,
+                    keras.layers.AveragePooling2D,
+                    keras.layers.GlobalMaxPool2D,
+            )):
+                data = np.transpose(data, (2, 0, 1))
+                image = PIL.Image.fromarray(get_image_tales(data))
+            else:
+                if len(data.shape) > 1:
+                    if len(data.shape) == 3:
+                        data = np.transpose(data, (2, 0, 1))
+                    image = PIL.Image.fromarray(get_layer_vis_square(data))
+                else:
+                    image = self.make_image_from_dense(data)
+
+            jpeg = self.pil_image_to_jpeg(image)
+
+            self.context.client.job_action('jobAddDebugLayer', [
+                time.time(),
+                layer_name,
+                base64.b64encode(jpeg).decode()
+            ])
+
+        # print("debug data sent")
+        self.last_debug_sent = time.time()
+
+    def make_image_from_dense(self, neurons):
+        from .utils import array_to_img
+        cols = int(math.ceil(math.sqrt(len(neurons))))
+
+        even_length = cols * cols
+        diff = even_length - len(neurons)
+        if diff > 0:
+            neurons = np.append(neurons, np.zeros(diff, dtype=neurons.dtype))
+
+        img = array_to_img(neurons.reshape((1, cols, cols)))
+        img = img.resize((cols * 8, cols * 8))
+
+        return img
+
+    def pil_image_to_jpeg(self, image):
+        buffer = six.BytesIO()
+
+        image.save(buffer, format="JPEG", optimize=True, quality=70)
+        return buffer.getvalue()
 
     def on_train_begin(self, logs={}):
         self.start_time = time.time()
@@ -109,18 +152,12 @@ class KerasCallback(Callback):
 
         deepkit.epoch(0, self.params['epochs'])
         deepkit.set_info('parameters', get_total_params(self.model))
-        deepkit.set_info('backend', K.backend())
-        deepkit.set_info('keras.version', keras.__version__)
-        deepkit.set_info('keras.floatx', K.floatx())
-
-        if hasattr(K, 'image_dim_ordering'):
-            deepkit.set_info('keras.format', K.image_dim_ordering())
 
         # self.job_backend.upload_keras_graph(self.model)
 
         if self.model.optimizer and hasattr(self.model.optimizer, 'get_config'):
             config = self.model.optimizer.get_config()
-            deepkit.set_info('optimizer', type(self.model.optimizer).__name__)
+            # deepkit.set_info('optimizer', type(self.model.optimizer).__name__)
             for i, v in config.items():
                 deepkit.set_info('optimizer.' + str(i), v)
 
@@ -181,11 +218,9 @@ class KerasCallback(Callback):
 
     def on_batch_end(self, batch, logs={}):
         self.filter_invalid_json_values(logs)
-        loss = logs['loss']
-
-        self.validation_per_batch.append(loss)
 
         deepkit.batch(batch + 1, self.current['nb_batches'], logs['size'])
+        self.send_debug_data()
 
     def on_epoch_begin(self, epoch, logs={}):
         self.epoch = epoch
@@ -205,15 +240,21 @@ class KerasCallback(Callback):
         self.send_optimizer_info(log['epoch'])
 
     def send_metrics(self, log, x):
-        accuracy_log_name = 'acc'
-        val_accuracy_log_name = 'val_acc'
+        accuracy_log_name = 'accuracy'
+        val_accuracy_log_name = 'val_accuracy'
 
         total_accuracy_validation = log.get(val_accuracy_log_name, None)
         total_accuracy_training = log.get(accuracy_log_name, None)
 
-        loss = log.get('loss', None), log.get('val_loss', None)
-        if loss[0] is not None or loss[1] is not None:
-            self.loss_metric.send(x, loss[0], loss[1])
+        if total_accuracy_validation: total_accuracy_validation = float(total_accuracy_validation)
+        if total_accuracy_training: total_accuracy_training = float(total_accuracy_training)
+
+        loss = log.get('loss', None)
+        val_loss = log.get('val_loss', None)
+        if loss is not None or val_loss is not None:
+            if loss: loss = float(loss)
+            if val_loss: val_loss = float(val_loss)
+            self.loss_metric.send(x, loss, val_loss)
 
         accuracy = [total_accuracy_training, total_accuracy_validation]
         if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
@@ -237,154 +278,15 @@ class KerasCallback(Callback):
         if hasattr(self.model, 'optimizer'):
             config = self.model.optimizer.get_config()
 
-            from keras.optimizers import Adadelta, Adam, Adamax, Adagrad, RMSprop, SGD
-
-            if isinstance(self.model.optimizer, Adadelta) or isinstance(self.model.optimizer, Adam) \
-                    or isinstance(self.model.optimizer, Adamax) or isinstance(self.model.optimizer, Adagrad) \
-                    or isinstance(self.model.optimizer, RMSprop) or isinstance(self.model.optimizer, SGD):
+            if 'lr' in config and 'decay' in config and hasattr(self.model.optimizer, 'iterations'):
                 return config['lr'] * (
-                        1. / (1. + config['decay'] * float(K.get_value(self.model.optimizer.iterations))))
+                        1. / (1. + config['decay'] * float(self.model.optimizer.iterations)))
 
             elif 'lr' in config:
                 return config['lr']
 
-    def is_image_shape(self, x):
-        if len(x.shape) != 3 and len(x.shape) != 2:
-            return False
-
-        if len(x.shape) == 2:
-            return True
-
-        #  check if it has either 1 or 3 channel
-        if K.image_dim_ordering() == 'th':
-            return (x.shape[0] == 1 or x.shape[0] == 3)
-
-        if K.image_dim_ordering() == 'tf':
-            return (x.shape[2] == 1 or x.shape[2] == 3)
-
     def has_multiple_inputs(self):
         return len(self.model.inputs) > 1
-
-    def build_insight_images(self):
-        if self.insights_x is None:
-            print("Insights requested, but no 'insights_x' in create_keras_callback() given.")
-
-        images = []
-        input_data_x_sample = []
-
-        if self.has_multiple_inputs():
-            if not isinstance(self.insights_x, dict) and not isinstance(self.insights_x, (list, tuple)):
-                raise Exception('insights_x must be a list or dict')
-
-            for i, layer in enumerate(self.model.input_layers):
-                x = self.insights_x[i] if isinstance(self.insights_x, list) else self.insights_x[layer.name]
-                input_data_x_sample.append([x])
-        else:
-            x = self.insights_x
-            input_data_x_sample.append([x])
-
-        for i, layer in enumerate(self.model.input_layers):
-            x = input_data_x_sample[i][0]
-            if len(x.shape) == 3 and self.is_image_shape(x):
-                if K.image_dim_ordering() == 'tf':
-                    x = np.transpose(x, (2, 0, 1))
-
-                image = self.make_image(x)
-                if image:
-                    images.append(JobImage(layer.name, image))
-
-        uses_learning_phase = self.model.uses_learning_phase
-        inputs = self.model.inputs[:]
-
-        if uses_learning_phase:
-            inputs += [K.learning_phase()]
-            input_data_x_sample += [0.]  # disable learning_phase
-
-        layers = self.model.layers + self.insight_layer
-
-        pos = 0
-        for layer in layers:
-            if isinstance(layer, keras.layers.convolutional.Convolution2D) or isinstance(layer,
-                                                                                         keras.layers.convolutional.MaxPooling2D) \
-                    or isinstance(layer, keras.layers.convolutional.UpSampling2D):
-                fn = K.function(inputs, self.get_layout_output_tensors(layer))
-
-                result = fn(input_data_x_sample)
-                Y = result[0]
-
-                data = Y[0]
-
-                if len(data.shape) == 3:
-                    if K.image_dim_ordering() == 'tf':
-                        data = np.transpose(data, (2, 0, 1))
-
-                    image = PIL.Image.fromarray(get_image_tales(data))
-                    pos += 1
-                    images.append(JobImage(layer.name, image, pos=pos))
-
-                if layer.get_weights():
-                    data = layer.get_weights()[0]
-
-                    # Keras 1 has channel only in last element when dim_ordering=tf
-                    is_weights_channel_last = keras.__version__[0] == '1' and K.image_dim_ordering() == 'tf'
-
-                    # Keras > 1 has channel always in last element
-                    if keras.__version__[0] != '1':
-                        is_weights_channel_last = True
-
-                    # move channel/filters to first elements to generate correct image
-                    if is_weights_channel_last:
-                        data = np.transpose(data, (2, 3, 0, 1))
-
-                    data = data.reshape((data.shape[0] * data.shape[1], data.shape[2], data.shape[3]))
-
-                    image = PIL.Image.fromarray(get_image_tales(data))
-                    pos += 1
-                    images.append(JobImage(layer.name + '_weights', image, layer.name + ' weights', pos=pos))
-
-            elif isinstance(layer, keras.layers.ZeroPadding2D) or isinstance(layer,
-                                                                             keras.layers.ZeroPadding1D) or isinstance(
-                layer, keras.layers.ZeroPadding3D):
-                pass
-            elif isinstance(layer, keras.layers.noise.GaussianDropout) or isinstance(layer,
-                                                                                     keras.layers.noise.GaussianNoise):
-                pass
-            elif isinstance(layer, keras.layers.Dropout):
-                pass
-            else:
-                outputs = self.get_layout_output_tensors(layer)
-
-                if len(outputs) > 0:
-                    fn = K.function(inputs, outputs)
-                    Y = fn(input_data_x_sample)[0]
-                    Y = np.squeeze(Y)
-
-                    if Y.size == 1:
-                        Y = np.array([Y])
-
-                    image = None
-                    if len(Y.shape) > 1:
-                        if len(Y.shape) == 3 and self.is_image_shape(Y) and K.image_dim_ordering() == 'tf':
-                            Y = np.transpose(Y, (2, 0, 1))
-
-                        image = PIL.Image.fromarray(get_layer_vis_square(Y))
-                    elif len(Y.shape) == 1:
-                        image = self.make_image_from_dense(Y)
-
-                    if image:
-                        pos += 1
-                        images.append(JobImage(layer.name, image, pos=pos))
-
-        return images
-
-    def get_layout_output_tensors(self, layer):
-        outputs = []
-
-        if hasattr(layer, 'inbound_nodes'):
-            for idx, node in enumerate(layer.inbound_nodes):
-                outputs.append(layer.get_output_at(idx))
-
-        return outputs
 
     def filter_invalid_json_values(self, dict):
         for k, v in six.iteritems(dict):
@@ -392,40 +294,3 @@ class KerasCallback(Callback):
                 dict[k] = v.tolist()
             if math.isnan(v) or math.isinf(v):
                 dict[k] = -1
-
-    def make_image(self, data):
-        from keras.preprocessing.image import array_to_img
-        try:
-            if len(data.shape) == 2:
-                # grayscale image, just add once channel
-                data = data.reshape((data.shape[0], data.shape[1], 1))
-
-            image = array_to_img(data)
-        except Exception:
-            return None
-
-        # image = image.resize((128, 128))
-
-        return image
-
-    def make_image_from_dense_softmax(self, neurons):
-        from .utils import array_to_img
-
-        img = array_to_img(neurons.reshape((1, len(neurons), 1)))
-        img = img.resize((9, len(neurons) * 8))
-
-        return img
-
-    def make_image_from_dense(self, neurons):
-        from .utils import array_to_img
-        cols = int(math.ceil(math.sqrt(len(neurons))))
-
-        even_length = cols * cols
-        diff = even_length - len(neurons)
-        if diff > 0:
-            neurons = np.append(neurons, np.zeros(diff, dtype=neurons.dtype))
-
-        img = array_to_img(neurons.reshape((1, cols, cols)))
-        img = img.resize((cols * 8, cols * 8))
-
-        return img

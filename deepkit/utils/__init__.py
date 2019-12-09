@@ -1,3 +1,4 @@
+import numpy as np
 
 def array_to_img(x, scale=True):
     """

@@ -217,20 +217,13 @@ def create_metric(name, traces=None,
     return JobMetric(name, traces, main, xaxis, yaxis, layout)
 
 
-def create_keras_callback(model,
-                          insights=False, insights_x=None,
-                          additional_insights_layer=[]):
+def create_keras_callback(model, debug_x=None):
     """
     :type validation_data: int|None: (x, y) or generator
     :type validation_data_size: int|None: Defines the size of validation_data, if validation_data is a generator
     """
 
-    if insights and (insights_x is None or insights_x is False):
-        raise Exception('Can not build Keras callback with active insights but with invalid `insights_x` as input.')
-
     from .deepkit_keras import KerasCallback
-    callback = KerasCallback(model)
-    callback.insights_x = insights_x
-    callback.insight_layer = additional_insights_layer
+    callback = KerasCallback(model, debug_x)
 
     return callback
