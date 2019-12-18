@@ -4,13 +4,19 @@ from __future__ import division
 import base64
 import math
 import os
+import sys
 import time
 
 import PIL.Image
 import numpy as np
 import six
-import tensorflow.keras as keras
-from tensorflow.keras import Model
+
+if 'keras' in sys.modules:
+    import keras
+    from keras import Model
+else:
+    import tensorflow.keras as keras
+    from tensorflow.keras import Model
 
 import deepkit
 from deepkit.tf import extract_model_graph
@@ -46,20 +52,6 @@ def get_total_params(model):
     return total_params
 
 
-class JobImage:
-    def __init__(self, name, pil_image, label=None, pos=None):
-        self.id = name
-        if not isinstance(pil_image, PIL.Image.Image):
-            raise Exception('JobImage requires a PIL.Image as image argument.')
-
-        self.image = pil_image
-        self.label = label
-        self.pos = pos
-
-        if self.pos is None:
-            self.pos = time.time()
-
-
 class KerasCallback(keras.callbacks.Callback):
     def __init__(self, model, debug_x=None):
         super(KerasCallback, self).__init__()
@@ -87,15 +79,18 @@ class KerasCallback(keras.callbacks.Callback):
         self.last_debug_sent = 0
 
     def send_debug_data(self):
-        if len(self.context.job_controller.watching_layers) == 0: return
+        if not self.context.debugger_controller:
+            return
+
+        if len(self.context.debugger_controller.watching_layers) == 0: return
 
         if self.last_debug_sent and (time.time() - self.last_debug_sent) < 1:
             return
 
-        for layer_name in self.context.job_controller.watching_layers.copy():
+        for layer_name in self.context.debugger_controller.watching_layers.copy():
             layer = self.model.get_layer(layer_name)
             model = Model(self.model.input, layer.output)
-            y = model.predict(self.debug_x)
+            y = model.predict(self.debug_x, steps=1)
             data = y[0]  # we pick only the first in the batch
 
             if isinstance(layer, (
@@ -185,8 +180,7 @@ class KerasCallback(keras.callbacks.Callback):
                 traces.append('val_' + output.name)
 
         self.accuracy_metric = deepkit.create_metric(
-            'accuracy',
-            main=True, traces=traces, xaxis=xaxis, yaxis=yaxis
+            'accuracy', traces=traces, xaxis=xaxis, yaxis=yaxis
         )
         self.loss_metric = deepkit.create_loss_metric('loss', xaxis=xaxis)
         self.learning_rate_metric = deepkit.create_metric('learning rate', traces=['start', 'end'], xaxis=xaxis)
@@ -198,7 +192,7 @@ class KerasCallback(keras.callbacks.Callback):
                 loss_traces.append('train_' + output.name)
                 loss_traces.append('val_' + output.name)
 
-            self.all_losses = deepkit.create_metric('loss_all', main=True, xaxis=xaxis, traces=loss_traces)
+            self.all_losses = deepkit.create_metric('loss_all', xaxis=xaxis, traces=loss_traces)
 
         # if self.force_insights or self.job_model.insights_enabled:
         #     images = self.build_insight_images()

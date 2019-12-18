@@ -1,7 +1,16 @@
 import inspect
+import sys
 
-from tensorflow_core.python.keras.utils.layer_utils import count_params
-from tensorflow.keras import Model
+import numpy as np
+
+if 'keras' in sys.modules:
+    from keras import Model
+else:
+    from tensorflow.keras import Model
+
+
+def count_params(weights):
+    return int(sum(np.prod(p.shape.as_list()) for p in weights))
 
 
 def extract_model_graph(model):

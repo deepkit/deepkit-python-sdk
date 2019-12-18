@@ -59,9 +59,6 @@ opt = keras.optimizers.Adadelta(lr=deepkit.floatparam('lr'))
 
 deepkit_callback = deepkit.create_keras_callback(
     model,
-    insights=True,
-    insights_x=x_train[1]
-    # , confusion_matrix=True, validation_data=(x_test, [y_test, x_test])
 )
 
 callbacks = [deepkit_callback]
@@ -70,6 +67,8 @@ callbacks = [deepkit_callback]
 model.compile(loss='categorical_crossentropy',
               optimizer=opt,
               metrics=['accuracy'])
+
+model.summary()
 
 x_train = x_train.astype('float32')
 x_test = x_test.astype('float32')

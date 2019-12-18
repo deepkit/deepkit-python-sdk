@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import os
 import sys
@@ -9,7 +7,7 @@ import six
 import deepkit.globals
 from deepkit.client import Client
 from deepkit.context import Context
-from deepkit.utils import get_parameter_by_path
+import deepkit.utils
 
 
 def log(s):
@@ -28,7 +26,7 @@ def context(config_path: str = None) -> Context:
     return context
 
 
-if 'DEEPKIT_JOB_ACCESSTOKEN' not in os.environ:
+if deepkit.utils.in_self_execution():
     class StdHook:
         def __init__(self, s):
             self.s = s
@@ -82,7 +80,7 @@ def parameter(path, value):
 
 
 def get_parameter(path, default=None):
-    res = get_parameter_by_path(get_job()['config']['parameters'], path)
+    res = deepkit.utils.get_parameter_by_path(get_job()['config']['parameters'], path)
     if res is None:
         parameter(path, default)
         return default
@@ -126,12 +124,10 @@ class JobMetric:
     :type job_backend: JobBackend
     """
 
-    def __init__(self, name, traces=None,
-                 main=False, xaxis=None, yaxis=None, layout=None):
+    def __init__(self, name, traces=None, xaxis=None, yaxis=None, layout=None):
         """
         :param name: str
         :param traces: None|list : per default create a trace based on "name".
-        :param main: bool : whether this metric is visible in the job view per default.
         :param xaxis: dict
         :param yaxis: dict
         :param layout: dict
@@ -147,7 +143,6 @@ class JobMetric:
 
         options = {
             'traces': traces,
-            'main': main,
             'xaxis': xaxis,
             'yaxis': yaxis,
             'layout': layout,
@@ -182,7 +177,6 @@ class JobLossMetric:
         self.name = name
         options = {
             'traces': ['training', 'validation'],
-            'main': True,
             'xaxis': xaxis,
             'yaxis': yaxis,
             'layout': layout,
@@ -204,17 +198,15 @@ def create_loss_metric(name='loss', xaxis=None, yaxis=None, layout=None):
     return JobLossMetric(name, xaxis, yaxis, layout)
 
 
-def create_metric(name, traces=None,
-                  main=False, xaxis=None, yaxis=None, layout=None):
+def create_metric(name, traces=None,  xaxis=None, yaxis=None, layout=None):
     """
     :param name: str
     :param traces: None|list : per default create a trace based on "name".
-        :param main: bool : whether this metric is visible in the job view per default.
     :param xaxis: dict
     :param yaxis: dict
     :param layout: dict
     """
-    return JobMetric(name, traces, main, xaxis, yaxis, layout)
+    return JobMetric(name, traces, xaxis, yaxis, layout)
 
 
 def create_keras_callback(model, debug_x=None):

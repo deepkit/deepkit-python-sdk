@@ -1,4 +1,14 @@
+import os
+
 import numpy as np
+
+
+def in_self_execution():
+    """
+    Returns true if the script is directly executed without `deepkit` cli.
+    """
+    return 'DEEPKIT_JOB_ACCESSTOKEN' not in os.environ
+
 
 def array_to_img(x, scale=True):
     """

@@ -1,19 +1,21 @@
-from __future__ import annotations
-
 import asyncio
 import atexit
-import time
-import signal
+import base64
+import json
 import os
+import signal
+import time
 from threading import Lock
 from typing import Optional, List
 
+import psutil
 from rx import interval
 from rx.operators import buffer
 from rx.subject import Subject
 
 import deepkit.client
 import deepkit.globals
+import deepkit.utils
 
 
 def pytorch_graph():
@@ -23,18 +25,6 @@ def pytorch_graph():
 
 
 class JobController:
-    def __init__(self):
-        self.watching_layers = {}
-
-    def debugStopWatchLayer(self, id: str):
-        print("Monitor stop", id)
-        if id in self.watching_layers:
-            del self.watching_layers[id]
-
-    def debugStartWatchLayer(self, id: str):
-        print("Monitor start", id)
-        self.watching_layers[id] = True
-
     def stop(self):
         """
         Raising the SIGINT signal in the current process and all sub-processes.
@@ -51,6 +41,18 @@ class JobController:
                 os.kill(os.getpid(), signal.SIGINT)
             else:
                 os.killpg(os.getpgid(os.getpid()), signal.SIGINT)
+
+
+class JobDebuggerController:
+    def __init__(self):
+        self.watching_layers = {}
+
+    def debugStopWatchLayer(self, id: str):
+        if id in self.watching_layers:
+            del self.watching_layers[id]
+
+    def debugStartWatchLayer(self, id: str):
+        self.watching_layers[id] = True
 
 
 class Context:
@@ -72,12 +74,25 @@ class Context:
         self.job_iterations = 0
         self.seconds_per_iteration = 0
         self.seconds_per_iterations = []
+        self.debugger_controller = None
 
-        self.job_controller = JobController()
-        asyncio.run_coroutine_threadsafe(
-            self.client.register_controller('job/' + self.client.job_id, self.job_controller),
-            self.client.loop
-        ).result()
+        def on_connect(connected):
+            if connected:
+                if deepkit.utils.in_self_execution():
+                    self.job_controller = JobController()
+                    asyncio.run_coroutine_threadsafe(
+                        self.client.register_controller('job/' + self.client.job_id, self.job_controller),
+                        self.client.loop
+                    )
+
+                self.debugger_controller = JobDebuggerController()
+                asyncio.run_coroutine_threadsafe(
+                    self.client.register_controller('job/' + self.client.job_id + '/debugger',
+                                                    self.debugger_controller),
+                    self.client.loop
+                )
+
+        self.client.connected.subscribe(on_connect)
 
         def on_log(data: List):
             if len(data) == 0: return
@@ -113,6 +128,37 @@ class Context:
             self.client.job_action('streamJsonFile', ['.deepkit/speed.csv', [rows[-1]]])
 
         self.speed_report_subject.pipe(buffer(interval(1))).subscribe(on_speed_report)
+
+        p = psutil.Process()
+        self.client.job_action(
+            'streamJsonFile',
+            [
+                '.deepkit/hardware/main_0.csv',
+                [
+                    [
+                        'time', 'cpu', 'memory', 'network_rx', 'network_tx',
+                        'block_write',
+                        'block_read'
+                    ]
+                ]
+            ]
+        )
+
+        def on_hardware_metrics(dummy):
+            net = psutil.net_io_counters()
+            disk = psutil.disk_io_counters()
+            data = [
+                time.time(),
+                (p.cpu_percent(interval=None) / 100) / psutil.cpu_count(),
+                p.memory_percent() / 100,
+                net.bytes_recv,
+                net.bytes_sent,
+                disk.write_bytes,
+                disk.read_bytes,
+            ]
+            self.client.job_action('streamJsonFile', ['.deepkit/hardware/main_0.csv', [data]])
+
+        interval(1).subscribe(on_hardware_metrics)
 
     def wait_for_connect(self):
         async def wait():
@@ -216,8 +262,15 @@ class Context:
     def debug_snapshot(self, graph: dict):
         self.client.job_action('debugSnapshot', [graph])
 
+    def add_file(self, path: str):
+        self.client.job_action('uploadFile', [path, base64.b64encode(open(path, 'rb').read()).decode('utf8')])
+
+    def add_file_content(self, path: str, content: bytes):
+        self.client.job_action('uploadFile', [path, base64.b64encode(content).decode('utf8')])
+
     def set_model_graph(self, graph: dict):
-        self.client.patch('modelGraph', graph)
+        self.add_file_content('.deepkit/graph.json', bytes(json.dumps(graph), 'utf8'))
+        self.client.patch('hasModelGraph', True)
 
     def metric(self, name: str, x, y):
         if name not in self.defined_metrics:

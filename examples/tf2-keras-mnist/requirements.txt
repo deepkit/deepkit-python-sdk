@@ -1,0 +1,5 @@
+tensorflow>=2.0
+psutil
+image
+websockets>=8.1
+rx>=1.5

@@ -23,7 +23,7 @@ resources:
 parameters:
     lr: 0.8
     batch_size: 128
-    epochs: 5
+    epochs: 15
     train_samples: 60000
     test_samples: 10000
 

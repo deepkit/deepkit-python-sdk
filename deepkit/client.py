@@ -7,6 +7,7 @@ import time
 from typing import Dict, List
 
 import websockets
+from rx.subject import BehaviorSubject
 
 import deepkit.globals
 import inspect
@@ -20,6 +21,7 @@ class Client(threading.Thread):
     connection: websockets.WebSocketClientProtocol
 
     def __init__(self, config_path: str):
+        self.connected = BehaviorSubject(False)
         self.config_path = config_path
         self.loop = asyncio.new_event_loop()
         self.host = os.environ.get('DEEPKIT_HOST', '127.0.0.1')
@@ -35,21 +37,17 @@ class Client(threading.Thread):
         self.controllers = {}
         self.patches = {}
         self.offline = False
-        self.loop = asyncio.new_event_loop()
         self.connections = 0
-        self.connecting = self.loop.create_future()
         self.lock = threading.Lock()
         threading.Thread.__init__(self)
         self.daemon = True
+        self.loop = asyncio.new_event_loop()
         self.start()
 
     def run(self):
+        self.connecting = self.loop.create_future()
         self.loop.create_task(self._connect())
         self.loop.run_forever()
-
-    def wait_for_connect(self):
-        promise = asyncio.run_coroutine_threadsafe(self.stop_and_sync(), self.loop)
-        promise.result()
 
     def shutdown(self):
         if self.offline: return
@@ -178,8 +176,8 @@ class Client(threading.Thread):
         return Controller(self)
 
     async def _action(self, controller: str, action: str, args: List, lock=True):
-        if self.offline: return
         if lock: await self.connecting
+        if self.offline: return
         if self.stopping: raise Exception('In shutdown: actions disallowed')
         res = await self._message({
             'name': 'action',
@@ -198,7 +196,6 @@ class Client(threading.Thread):
         raise Exception(f"Invalid action type '{res['type']}'. Not implemented")
 
     def job_action(self, action: str, args: List):
-        if self.offline: return
         return asyncio.run_coroutine_threadsafe(self._action('job', action, args), self.loop)
 
     async def _subscribe(self, message, subscriber):
@@ -219,8 +216,7 @@ class Client(threading.Thread):
         self.queue.append(message)
 
     async def _message(self, message, lock=True, no_response=False):
-        if lock:
-            await self.connecting
+        if lock: await self.connecting
 
         self.message_id += 1
         message['id'] = self.message_id
@@ -245,15 +241,15 @@ class Client(threading.Thread):
             try:
                 q = self.queue[:]
                 for m in q:
-                    await self.connection.send(json.dumps(m))
+                    await connection.send(json.dumps(m))
                     self.queue.remove(m)
-            except websockets.exceptions.ConnectionClosed:
+            except Exception:
                 return
 
             if len(self.patches) > 0:
                 try:
                     send = self.patches.copy()
-                    await self.connection.send(json.dumps({
+                    await connection.send(json.dumps({
                         'name': 'action',
                         'controller': 'job',
                         'action': 'patchJob',
@@ -284,7 +280,6 @@ class Client(threading.Thread):
                 return
 
             if res and 'id' in res:
-
                 if res['id'] in self.subscriber:
                     await self.subscriber[res['id']](res)
 
@@ -295,9 +290,10 @@ class Client(threading.Thread):
         if not self.stopping:
             print("Deepkit: lost connection. reconnect ...")
             self.connecting = self.loop.create_future()
+            self.connected.on_next(False)
             self.loop.create_task(self._connect())
 
-    async def connect_job(self, host: str, port: int, id: str, token: str):
+    async def _connect_job(self, host: str, port: int, id: str, token: str):
         try:
             self.connection = await websockets.connect(f"ws://{host}:{port}")
         except Exception:
@@ -318,9 +314,10 @@ class Client(threading.Thread):
             }
         }, lock=False)
 
-        if not res['result']:
+        if not res['result'] or res['result'] != True:
             raise Exception('Job token invalid')
 
+        # load job controller
         await self._message({
             'name': 'action',
             'controller': 'job',
@@ -331,11 +328,16 @@ class Client(threading.Thread):
         if self.connections > 0:
             print("Deepkit: Reconnected.")
 
+        self.connected.on_next(True)
         self.connections += 1
 
     async def _connect(self):
+        # we want to restart with a empty queue, so authentication happens always first
+        queue_copy = self.queue[:]
+        self.queue = []
+
         if self.token:
-            await self.connect_job(self.host, self.port, self.job_id, self.token)
+            await self._connect_job(self.host, self.port, self.job_id, self.token)
         else:
             account_config = self.get_account_config(self.account)
             self.host = account_config['host']
@@ -367,12 +369,15 @@ class Client(threading.Thread):
             if self.config_path and os.path.exists(self.config_path):
                 deepkit_config_yaml = open(self.config_path, 'r', encoding='utf-8').read()
 
-            job = await self._action('app', 'createJob', [link['projectId'], deepkit_config_yaml], lock=False)
+            job = await self._action('app', 'createJob', [link['projectId'], self.config_path, deepkit_config_yaml],
+                                     lock=False)
             deepkit.globals.loaded_job = job
             self.token = await self._action('app', 'getJobAccessToken', [job['id']], lock=False)
             self.job_id = job['id']
             await self.connection.close()
-            await self.connect_job(self.host, self.port, self.job_id, self.token)
+            await self._connect_job(self.host, self.port, self.job_id, self.token)
+
+        self.queue = queue_copy + self.queue
 
     def get_account_config(self, name: str) -> Dict:
         with open(os.path.expanduser('~') + '/.deepkit/config', 'r') as h:
