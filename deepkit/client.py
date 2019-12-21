@@ -314,7 +314,7 @@ class Client(threading.Thread):
             }
         }, lock=False)
 
-        if not res['result'] or res['result'] != True:
+        if not res['result'] or res['result'] is not True:
             raise Exception('Job token invalid')
 
         # load job controller

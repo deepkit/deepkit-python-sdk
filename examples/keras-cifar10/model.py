@@ -57,9 +57,7 @@ model.add(Dense(num_classes, activation='softmax'))
 
 opt = keras.optimizers.Adadelta(lr=deepkit.floatparam('lr'))
 
-deepkit_callback = deepkit.create_keras_callback(
-    model,
-)
+deepkit_callback = deepkit.create_keras_callback()
 
 callbacks = [deepkit_callback]
 

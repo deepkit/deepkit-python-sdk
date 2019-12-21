@@ -30,6 +30,7 @@ train_dataset = tf.data.Dataset.from_generator(
     # (tf.TensorShape([28, 28]), tf.TensorShape([10]))
     ((tf.TensorShape([28, 28, 1]), tf.TensorShape([28, 28, 1])), tf.TensorShape([10]))
 )
+context.add_tag('Test')
 train_dataset = train_dataset.batch(100)
 # val_dataset = train_dataset.batch(10)
 
@@ -77,5 +78,5 @@ model.compile(optimizer=optimizers.Adam(0.001),
 model.fit(train_dataset.repeat(), epochs=30, steps_per_epoch=500,
           validation_data=train_dataset.repeat(),
           validation_steps=2,
-          callbacks=[tensorboard_callback, deepkit.create_keras_callback(model, train_dataset.take(1))]
+          callbacks=[tensorboard_callback, deepkit.create_keras_callback(train_dataset.take(1))]
           )

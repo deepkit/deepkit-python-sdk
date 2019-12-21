@@ -6,6 +6,7 @@ import math
 import os
 import sys
 import time
+from uuid import uuid4
 
 import PIL.Image
 import numpy as np
@@ -43,8 +44,7 @@ def ensure_dir(d):
 def get_total_params(model):
     total_params = 0
 
-    flattened_layers = model.flattened_layers if hasattr(
-        model, 'flattened_layers') else model.layers
+    flattened_layers = model.flattened_layers if hasattr(model, 'flattened_layers') else model.layers
 
     for i in range(len(flattened_layers)):
         total_params += flattened_layers[i].count_params()
@@ -53,11 +53,12 @@ def get_total_params(model):
 
 
 class KerasCallback(keras.callbacks.Callback):
-    def __init__(self, model, debug_x=None):
+    def __init__(self, debug_x=None):
         super(KerasCallback, self).__init__()
 
-        self.model = model
         self.context = deepkit.context()
+
+        self.context.debugger_controller.snapshot.subscribe(self.snapshot)
 
         self.debug_x = debug_x
 
@@ -75,8 +76,80 @@ class KerasCallback(keras.callbacks.Callback):
         self.learning_rate_metric = None
 
         self.learning_rate_start = 0
-        self.context.set_model_graph(extract_model_graph(model))
         self.last_debug_sent = 0
+
+    def snapshot(self, options: dict):
+        id = uuid4()
+        layers = []
+
+        if options['mode'] is 'all':
+            layers = [layer.name for layer in self.model.layers]
+
+        if options['mode'] is 'watching':
+            layers = self.context.debugger_controller.watching_layers.copy()
+
+        self.context.client.job_action('jobDebugStartSnapshot', [
+            id,
+            time.time(),
+            layers
+        ])
+
+        for layer_name in layers:
+            jpeg = self.get_image_from_layer(layer_name)
+            whistogram, bhistogram = self.get_weight_histogram_from_layer(layer_name)
+
+            self.context.client.job_action('jobDebugSnapshotLayer', [
+                id,
+                layer_name,
+                time.time(),
+                base64.b64encode(jpeg).decode(),
+                whistogram,
+                bhistogram,
+            ])
+
+    def set_model(self, model):
+        super().set_model(model)
+        self.context.set_model_graph(extract_model_graph(self.model))
+
+    def get_weight_histogram_from_layer(self, layer_name: str):
+        weights = self.model.get_layer(layer_name).get_weights()
+        w_dict = None
+
+        if len(weights) > 0:
+            w = np.histogram(weights[0])
+            w_dict = {'y': list(w[0]), 'x': list(w[1])}
+
+        b_dict = None
+        if len(weights) > 1:
+            b = np.histogram(weights[1])
+            b_dict = {'y': list(b[0]), 'x': list(b[1])}
+
+        return w_dict, b_dict
+
+    def get_image_from_layer(self, layer_name: str):
+        layer = self.model.get_layer(layer_name)
+        model = Model(self.model.input, layer.output)
+        y = model.predict(self.debug_x, steps=1)
+        data = y[0]  # we pick only the first in the batch
+
+        if isinstance(layer, (
+                keras.layers.Conv2D,
+                keras.layers.UpSampling2D,
+                keras.layers.MaxPooling2D,
+                keras.layers.AveragePooling2D,
+                keras.layers.GlobalMaxPool2D,
+        )):
+            data = np.transpose(data, (2, 0, 1))
+            image = PIL.Image.fromarray(get_image_tales(data))
+        else:
+            if len(data.shape) > 1:
+                if len(data.shape) == 3:
+                    data = np.transpose(data, (2, 0, 1))
+                image = PIL.Image.fromarray(get_layer_vis_square(data))
+            else:
+                image = self.make_image_from_dense(data)
+
+        return self.pil_image_to_jpeg(image)
 
     def send_debug_data(self):
         if not self.context.debugger_controller:
@@ -88,34 +161,15 @@ class KerasCallback(keras.callbacks.Callback):
             return
 
         for layer_name in self.context.debugger_controller.watching_layers.copy():
-            layer = self.model.get_layer(layer_name)
-            model = Model(self.model.input, layer.output)
-            y = model.predict(self.debug_x, steps=1)
-            data = y[0]  # we pick only the first in the batch
-
-            if isinstance(layer, (
-                    keras.layers.Conv2D,
-                    keras.layers.UpSampling2D,
-                    keras.layers.MaxPooling2D,
-                    keras.layers.AveragePooling2D,
-                    keras.layers.GlobalMaxPool2D,
-            )):
-                data = np.transpose(data, (2, 0, 1))
-                image = PIL.Image.fromarray(get_image_tales(data))
-            else:
-                if len(data.shape) > 1:
-                    if len(data.shape) == 3:
-                        data = np.transpose(data, (2, 0, 1))
-                    image = PIL.Image.fromarray(get_layer_vis_square(data))
-                else:
-                    image = self.make_image_from_dense(data)
-
-            jpeg = self.pil_image_to_jpeg(image)
+            jpeg = self.get_image_from_layer(layer_name)
+            whistogram, bhistogram = self.get_weight_histogram_from_layer(layer_name)
 
             self.context.client.job_action('jobAddDebugLayer', [
                 time.time(),
                 layer_name,
-                base64.b64encode(jpeg).decode()
+                base64.b64encode(jpeg).decode(),
+                whistogram,
+                bhistogram,
             ])
 
         # print("debug data sent")

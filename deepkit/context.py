@@ -46,6 +46,10 @@ class JobController:
 class JobDebuggerController:
     def __init__(self):
         self.watching_layers = {}
+        self.snapshot = Subject()
+
+    def debugSnapshot(self):
+        self.snapshot.on_next({'mode': 'all'})
 
     def debugStopWatchLayer(self, id: str):
         if id in self.watching_layers:
@@ -76,16 +80,19 @@ class Context:
         self.seconds_per_iterations = []
         self.debugger_controller = None
 
+        if deepkit.utils.in_self_execution():
+            self.job_controller = JobController()
+
+        self.debugger_controller = JobDebuggerController()
+
         def on_connect(connected):
             if connected:
                 if deepkit.utils.in_self_execution():
-                    self.job_controller = JobController()
                     asyncio.run_coroutine_threadsafe(
                         self.client.register_controller('job/' + self.client.job_id, self.job_controller),
                         self.client.loop
                     )
 
-                self.debugger_controller = JobDebuggerController()
                 asyncio.run_coroutine_threadsafe(
                     self.client.register_controller('job/' + self.client.job_id + '/debugger',
                                                     self.debugger_controller),
@@ -252,6 +259,15 @@ class Context:
     def set_info(self, name: str, value: any):
         self.client.patch('infos.' + name, value)
 
+    def set_description(self, description: any):
+        self.client.patch('description', description)
+
+    def add_tag(self, tag: str):
+        self.client.job_action('addTag', [tag])
+
+    def rm_tag(self, tag: str):
+        self.client.job_action('rmTag', [tag])
+
     def set_parameter(self, name: str, value: any):
         self.client.patch('config.parameters.' + name, value)
 
@@ -269,12 +285,11 @@ class Context:
         self.client.job_action('uploadFile', [path, base64.b64encode(content).decode('utf8')])
 
     def set_model_graph(self, graph: dict):
-        self.add_file_content('.deepkit/graph.json', bytes(json.dumps(graph), 'utf8'))
-        self.client.patch('hasModelGraph', True)
+        self.client.job_action('setModelGraph', [graph])
 
     def metric(self, name: str, x, y):
         if name not in self.defined_metrics:
-            self.define_metric(name)
+            self.define_metric(name, {})
 
         if not isinstance(y, list):
             y = [y]
@@ -282,5 +297,5 @@ class Context:
         self.metric_subject.on_next({'id': name, 'row': [x, time.time()] + y})
         self.client.patch('channels.' + name + '.lastValue', y)
 
-    def log(self, s):
+    def log(self, s: str):
         self.log_subject.on_next(s)

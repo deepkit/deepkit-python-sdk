@@ -209,13 +209,13 @@ def create_metric(name, traces=None,  xaxis=None, yaxis=None, layout=None):
     return JobMetric(name, traces, xaxis, yaxis, layout)
 
 
-def create_keras_callback(model, debug_x=None):
+def create_keras_callback(debug_x=None):
     """
     :type validation_data: int|None: (x, y) or generator
     :type validation_data_size: int|None: Defines the size of validation_data, if validation_data is a generator
     """
 
     from .deepkit_keras import KerasCallback
-    callback = KerasCallback(model, debug_x)
+    callback = KerasCallback(debug_x)
 
     return callback
