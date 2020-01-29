@@ -3,3 +3,4 @@ psutil
 image
 websockets>=8.1
 rx>=1.5
+typedload

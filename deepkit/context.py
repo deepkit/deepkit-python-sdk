@@ -1,7 +1,6 @@
 import asyncio
 import atexit
 import base64
-import json
 import os
 import signal
 import time
@@ -16,6 +15,7 @@ from rx.subject import Subject
 import deepkit.client
 import deepkit.globals
 import deepkit.utils
+from deepkit.model import ContextOptions
 
 
 def pytorch_graph():
@@ -60,17 +60,21 @@ class JobDebuggerController:
 
 
 class Context:
-    def __init__(self, config_path: str):
+    def __init__(self, options: ContextOptions = None):
+        if options is None:
+            options = ContextOptions()
+
+        self.client = deepkit.client.Client(options)
         deepkit.globals.last_context = self
         self.log_lock = Lock()
         self.defined_metrics = {}
         self.log_subject = Subject()
         self.metric_subject = Subject()
         self.speed_report_subject = Subject()
+        self.shutting_down = False
 
-        self.client = deepkit.client.Client(config_path)
-        self.wait_for_connect()
         atexit.register(self.shutdown)
+        self.wait_for_connect()
 
         self.last_iteration_time = 0
         self.last_batch_time = 0
@@ -101,19 +105,6 @@ class Context:
 
         self.client.connected.subscribe(on_connect)
 
-        def on_log(data: List):
-            if len(data) == 0: return
-            packed = ''
-            for d in data:
-                packed += d
-
-            self.client.job_action('log', ['main_0', packed])
-
-        self.log_subject.pipe(buffer(interval(1))).subscribe(on_log)
-
-        if len(deepkit.globals.last_logs.getvalue()) > 0:
-            self.log_subject.on_next(deepkit.globals.last_logs.getvalue())
-
         def on_metric(data: List):
             if len(data) == 0: return
             packed = {}
@@ -136,36 +127,53 @@ class Context:
 
         self.speed_report_subject.pipe(buffer(interval(1))).subscribe(on_speed_report)
 
-        p = psutil.Process()
-        self.client.job_action(
-            'streamJsonFile',
-            [
-                '.deepkit/hardware/main_0.csv',
+        if deepkit.utils.in_self_execution:
+            # the CLI handled output logging otherwise
+            def on_log(data: List):
+                if len(data) == 0: return
+                packed = ''
+                for d in data:
+                    packed += d
+
+                self.client.job_action('log', ['main_0', packed])
+
+            self.log_subject.pipe(buffer(interval(1))).subscribe(on_log)
+
+            if len(deepkit.globals.last_logs.getvalue()) > 0:
+                self.log_subject.on_next(deepkit.globals.last_logs.getvalue())
+
+        if deepkit.utils.in_self_execution:
+            # the CLI handled output logging otherwise
+            p = psutil.Process()
+            self.client.job_action(
+                'streamJsonFile',
                 [
+                    '.deepkit/hardware/main_0.csv',
                     [
-                        'time', 'cpu', 'memory', 'network_rx', 'network_tx',
-                        'block_write',
-                        'block_read'
+                        [
+                            'time', 'cpu', 'memory', 'network_rx', 'network_tx',
+                            'block_write',
+                            'block_read'
+                        ]
                     ]
                 ]
-            ]
-        )
+            )
 
-        def on_hardware_metrics(dummy):
-            net = psutil.net_io_counters()
-            disk = psutil.disk_io_counters()
-            data = [
-                time.time(),
-                (p.cpu_percent(interval=None) / 100) / psutil.cpu_count(),
-                p.memory_percent() / 100,
-                net.bytes_recv,
-                net.bytes_sent,
-                disk.write_bytes,
-                disk.read_bytes,
-            ]
-            self.client.job_action('streamJsonFile', ['.deepkit/hardware/main_0.csv', [data]])
+            def on_hardware_metrics(dummy):
+                net = psutil.net_io_counters()
+                disk = psutil.disk_io_counters()
+                data = [
+                    time.time(),
+                    (p.cpu_percent(interval=None) / 100) / psutil.cpu_count(),
+                    p.memory_percent() / 100,
+                    net.bytes_recv,
+                    net.bytes_sent,
+                    disk.write_bytes,
+                    disk.read_bytes,
+                ]
+                self.client.job_action('streamJsonFile', ['.deepkit/hardware/main_0.csv', [data]])
 
-        interval(1).subscribe(on_hardware_metrics)
+            interval(1).subscribe(on_hardware_metrics)
 
     def wait_for_connect(self):
         async def wait():
@@ -174,6 +182,8 @@ class Context:
         asyncio.run_coroutine_threadsafe(wait(), self.client.loop).result()
 
     def shutdown(self):
+        if self.shutting_down: return
+        self.shutting_down = True
         self.metric_subject.on_completed()
         self.log_subject.on_completed()
 

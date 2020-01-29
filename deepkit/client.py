@@ -1,28 +1,35 @@
 import asyncio
+import inspect
 import json
 import os
 import sys
 import threading
-import time
-from typing import Dict, List
+from datetime import datetime
+from typing import Dict, List, Optional
 
 import websockets
 from rx.subject import BehaviorSubject
 
 import deepkit.globals
-import inspect
+from deepkit.home import get_home_config
+from deepkit.model import ContextOptions, FolderLink
 
 
 def is_in_directory(filepath, directory):
     return os.path.realpath(filepath).startswith(os.path.realpath(directory))
 
 
+class ApiError(Exception):
+    pass
+
+
 class Client(threading.Thread):
     connection: websockets.WebSocketClientProtocol
 
-    def __init__(self, config_path: str):
+    def __init__(self, options: ContextOptions):
         self.connected = BehaviorSubject(False)
-        self.config_path = config_path
+        self.options: ContextOptions = options
+
         self.loop = asyncio.new_event_loop()
         self.host = os.environ.get('DEEPKIT_HOST', '127.0.0.1')
         self.port = int(os.environ.get('DEEPKIT_PORT', '8960'))
@@ -60,29 +67,36 @@ class Client(threading.Thread):
     async def stop_and_sync(self):
         self.stopping = True
 
-        # todo, assign correct status depending on python exit code
-
         # done = 150, //when all tasks are done
         # aborted = 200, //when at least one task aborted
         # failed = 250, //when at least one task failed
         # crashed = 300, //when at least one task crashed
         self.patches['status'] = 150
-        self.patches['ended'] = time.time() * 1000
-
-        self.patches['tasks.main.ended'] = time.time() * 1000
+        self.patches['ended'] = datetime.utcnow().isoformat()
+        self.patches['tasks.main.ended'] = datetime.utcnow().isoformat()
 
         # done = 500,
         # aborted = 550,
         # failed = 600,
         # crashed = 650,
         self.patches['tasks.main.status'] = 500
+        self.patches['tasks.main.instances.0.ended'] = datetime.utcnow().isoformat()
 
-        self.patches['tasks.main.instances.0.ended'] = time.time() * 1000
         # done = 500,
         # aborted = 550,
         # failed = 600,
         # crashed = 650,
         self.patches['tasks.main.instances.0.status'] = 500
+
+        if hasattr(sys, 'last_value'):
+            if isinstance(sys.last_value, KeyboardInterrupt):
+                self.patches['status'] = 200
+                self.patches['tasks.main.status'] = 550
+                self.patches['tasks.main.instances.0.status'] = 550
+            else:
+                self.patches['status'] = 300
+                self.patches['tasks.main.status'] = 650
+                self.patches['tasks.main.instances.0.status'] = 650
 
         while len(self.patches) > 0 or len(self.queue) > 0:
             await asyncio.sleep(0.15)
@@ -103,35 +117,38 @@ class Client(threading.Thread):
 
             if message['type'] == 'peerController/message':
                 data = message['data']
+
                 if not hasattr(controller, data['action']):
                     error = f"Requested action {message['action']} not available in {name}"
                     print(error, file=sys.stderr)
                     await self._message({
                         'name': 'peerController/message',
                         'controllerName': name,
-                        'replyId': message['replyId'],
-                        'data': {'type': 'error', 'id': 0, 'stack': None, 'entityName': '@error:default',
+                        'clientId': message['clientId'],
+                        'data': {'type': 'error', 'id': data['id'], 'stack': None, 'entityName': '@error:default',
                                  'error': error}
                     }, no_response=True)
 
                 if data['name'] == 'actionTypes':
                     parameters = []
+
+                    i = 0
                     for arg in inspect.getfullargspec(getattr(controller, data['action'])).args:
                         parameters.append({
-                            'type': 'Any',
-                            'array': False,
-                            'partial': False
+                            'type': 'any',
+                            'name': '#' + str(i)
                         })
+                        i += 1
 
                     await self._message({
                         'name': 'peerController/message',
                         'controllerName': name,
-                        'replyId': message['replyId'],
+                        'clientId': message['clientId'],
                         'data': {
                             'type': 'actionTypes/result',
-                            'id': 0,
+                            'id': data['id'],
                             'parameters': parameters,
-                            'returnType': {'partial': False, 'type': 'Any', 'array': False}
+                            'returnType': {'type': 'any', 'name': 'result'}
                         }
                     }, no_response=True)
 
@@ -142,10 +159,11 @@ class Client(threading.Thread):
                         await self._message({
                             'name': 'peerController/message',
                             'controllerName': name,
-                            'replyId': message['replyId'],
+                            'clientId': message['clientId'],
                             'data': {
                                 'type': 'next/json',
-                                'id': message['id'],
+                                'id': data['id'],
+                                'encoding': {'name': 'r', 'type': 'any'},
                                 'next': res,
                             }
                         }, no_response=True)
@@ -153,8 +171,8 @@ class Client(threading.Thread):
                         await self._message({
                             'name': 'peerController/message',
                             'controllerName': name,
-                            'replyId': message['replyId'],
-                            'data': {'type': 'error', 'id': 0, 'stack': None, 'entityName': '@error:default',
+                            'clientId': message['clientId'],
+                            'data': {'type': 'error', 'id': data['id'], 'stack': None, 'entityName': '@error:default',
                                      'error': str(e)}
                         }, no_response=True)
 
@@ -175,10 +193,11 @@ class Client(threading.Thread):
 
         return Controller(self)
 
-    async def _action(self, controller: str, action: str, args: List, lock=True):
+    async def _action(self, controller: str, action: str, args: List, lock=True, allow_in_shutdown=False):
         if lock: await self.connecting
         if self.offline: return
-        if self.stopping: raise Exception('In shutdown: actions disallowed')
+        if self.stopping and not allow_in_shutdown: raise Exception('In shutdown: actions disallowed')
+
         res = await self._message({
             'name': 'action',
             'controller': controller,
@@ -186,14 +205,15 @@ class Client(threading.Thread):
             'args': args,
             'timeout': 60
         }, lock=lock)
+
         if res['type'] == 'next/json':
-            return res['next']
+            return res['next'] if 'next' in res else None
 
         if res['type'] == 'error':
             print(res, file=sys.stderr)
-            raise Exception('API Error: ' + res['error'])
+            raise ApiError('API Error: ' + str(res['error']))
 
-        raise Exception(f"Invalid action type '{res['type']}'. Not implemented")
+        raise ApiError(f"Invalid action type '{res['type']}'. Not implemented")
 
     def job_action(self, action: str, args: List):
         return asyncio.run_coroutine_threadsafe(self._action('job', action, args), self.loop)
@@ -232,7 +252,7 @@ class Client(threading.Thread):
 
     def patch(self, path: str, value: any):
         if self.offline: return
-        if self.stopping: raise Exception('In shutdown: patches disallowed')
+        if self.stopping: return
 
         self.patches[path] = value
 
@@ -243,10 +263,16 @@ class Client(threading.Thread):
                 for m in q:
                     await connection.send(json.dumps(m))
                     self.queue.remove(m)
-            except Exception:
+            except Exception as e:
+                print("Failed sending, exit send_messages", e)
                 return
 
             if len(self.patches) > 0:
+                # we have to send first all messages/actions out
+                # before sending patches, as most of the time
+                # patches are based on previously created entities,
+                # so we need to make sure those entities are created
+                # first before sending any patches.
                 try:
                     send = self.patches.copy()
                     await connection.send(json.dumps({
@@ -262,11 +288,13 @@ class Client(threading.Thread):
                     for i in send.keys():
                         if self.patches[i] == send[i]:
                             del self.patches[i]
-
                 except websockets.exceptions.ConnectionClosed:
                     return
+                except ApiError:
+                    print("Patching failed. Syncing job data disabled.", file=sys.stderr)
+                    return
 
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.2)
 
     async def handle_messages(self, connection):
         while not connection.closed:
@@ -339,12 +367,20 @@ class Client(threading.Thread):
         if self.token:
             await self._connect_job(self.host, self.port, self.job_id, self.token)
         else:
-            account_config = self.get_account_config(self.account)
-            self.host = account_config['host']
-            self.port = account_config['port']
+            config = get_home_config()
+            link: Optional[FolderLink] = None
+            if self.options.account:
+                account_config = config.get_account_for_name(self.options.account)
+            else:
+                link = config.get_folder_link_of_directory(sys.path[0])
+                account_config = config.get_account_for_id(link.accountId)
+
+            self.host = account_config.host
+            self.port = account_config.port
+            ws = 'wss' if account_config.ssl else 'ws'
 
             try:
-                self.connection = await websockets.connect(f"ws://{self.host}:{self.port}")
+                self.connection = await websockets.connect(f"{ws}://{self.host}:{self.port}")
             except Exception as e:
                 self.offline = True
                 print(f"Deepkit: App not started or server not reachable. Monitoring disabled. {e}")
@@ -357,42 +393,39 @@ class Client(threading.Thread):
                 'name': 'authenticate',
                 'token': {
                     'id': 'user',
-                    'token': account_config['token']
+                    'token': account_config.token
                 }
             }, lock=False)
             if not res['result']:
                 raise Exception('Login invalid')
 
-            link = self.get_folder_link()
-
             deepkit_config_yaml = None
-            if self.config_path and os.path.exists(self.config_path):
-                deepkit_config_yaml = open(self.config_path, 'r', encoding='utf-8').read()
+            if self.options.config_path and os.path.exists(self.options.config_path):
+                deepkit_config_yaml = open(self.options.config_path, 'r', encoding='utf-8').read()
 
-            job = await self._action('app', 'createJob', [link['projectId'], self.config_path, deepkit_config_yaml],
+            if link:
+                projectId = link.projectId
+            else:
+                if not self.options.project:
+                    raise Exception('No project defined. Please use ContextOptions(project="project-name") '
+                                    'to specify which project to use.')
+
+                project = await self._action('app', 'getProjectForPublicName', [self.options.project], lock=False)
+                if not project:
+                    raise Exception(f'No project found for name {self.options.project}. '
+                                    f'Do you use the correct account? (used {account_config.name})')
+
+                projectId = project['id']
+
+            job = await self._action('app', 'createJob', [projectId, self.options.config_path, deepkit_config_yaml],
                                      lock=False)
+
             deepkit.globals.loaded_job = job
             self.token = await self._action('app', 'getJobAccessToken', [job['id']], lock=False)
             self.job_id = job['id']
+
+            # todo, implement re-authentication, so we don't have to drop the active connection
             await self.connection.close()
             await self._connect_job(self.host, self.port, self.job_id, self.token)
 
         self.queue = queue_copy + self.queue
-
-    def get_account_config(self, name: str) -> Dict:
-        with open(os.path.expanduser('~') + '/.deepkit/config', 'r') as h:
-            config = json.load(h)
-            for account in config['accounts']:
-                if account['name'] == name:
-                    return account
-
-        raise Exception(f"No account for {name} found.")
-
-    def get_folder_link(self) -> Dict:
-        with open(os.path.expanduser('~') + '/.deepkit/config', 'r') as h:
-            config = json.load(h)
-            for link in config['folderLinks']:
-                if is_in_directory(sys.path[0], link['path']):
-                    return link
-
-        raise Exception(f"No project link for {sys.path[0]} found.")

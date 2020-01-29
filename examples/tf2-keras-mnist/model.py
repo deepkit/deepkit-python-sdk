@@ -2,10 +2,13 @@ import datetime
 
 import tensorflow as tf
 from tensorflow.keras import Model, layers, optimizers, datasets
-
 import deepkit
+from deepkit import ContextOptions
 
-context = deepkit.context()
+context = deepkit.context(ContextOptions(
+    # account='peter',
+    # project='deepkitorg/tf2-keras-mnist'
+))
 context.add_file('model.py')
 
 (x, y), (x_val, y_val) = datasets.fashion_mnist.load_data()

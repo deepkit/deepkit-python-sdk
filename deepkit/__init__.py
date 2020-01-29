@@ -6,7 +6,7 @@ import six
 
 import deepkit.globals
 from deepkit.client import Client
-from deepkit.context import Context
+from deepkit.context import Context, ContextOptions
 import deepkit.utils
 
 
@@ -17,11 +17,15 @@ def log(s):
         deepkit.globals.last_logs.write(s)
 
 
-def context(config_path: str = None) -> Context:
+def context(options: ContextOptions = None) -> Context:
+    """
+    :param options: ContextOptions
+    :return: returns either a new context or the last created one. Never creates multiple context.
+    """
     if deepkit.globals.last_context:
         return deepkit.globals.last_context
 
-    context = Context(config_path)
+    context = Context(options)
 
     return context
 
@@ -198,7 +202,7 @@ def create_loss_metric(name='loss', xaxis=None, yaxis=None, layout=None):
     return JobLossMetric(name, xaxis, yaxis, layout)
 
 
-def create_metric(name, traces=None,  xaxis=None, yaxis=None, layout=None):
+def create_metric(name, traces=None, xaxis=None, yaxis=None, layout=None):
     """
     :param name: str
     :param traces: None|list : per default create a trace based on "name".

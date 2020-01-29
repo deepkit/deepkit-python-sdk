@@ -117,12 +117,12 @@ class KerasCallback(keras.callbacks.Callback):
 
         if len(weights) > 0:
             w = np.histogram(weights[0])
-            w_dict = {'y': list(w[0]), 'x': list(w[1])}
+            w_dict = {'y': w[0].tolist(), 'x': w[1].tolist()}
 
         b_dict = None
         if len(weights) > 1:
             b = np.histogram(weights[1])
-            b_dict = {'y': list(b[0]), 'x': list(b[1])}
+            b_dict = {'y': b[0].tolist(), 'x': b[1].tolist()}
 
         return w_dict, b_dict
 
