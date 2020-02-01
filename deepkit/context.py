@@ -3,6 +3,7 @@ import atexit
 import base64
 import os
 import signal
+import struct
 import time
 from threading import Lock
 from typing import Optional, List
@@ -107,23 +108,23 @@ class Context:
 
         def on_metric(data: List):
             if len(data) == 0: return
-            packed = {}
 
+            packed = {}
             for d in data:
                 if d['id'] not in packed:
-                    packed[d['id']] = []
+                    packed[d['id']] = b''
 
-                packed[d['id']].append(d['row'])
+                packed[d['id']] += d['row']
 
             for i, v in packed.items():
-                self.client.job_action('channelData', [i, v])
+                self.client.job_action('channelData', [i, base64.b64encode(v).decode('utf8')])
 
         self.metric_subject.pipe(buffer(interval(1))).subscribe(on_metric)
 
         def on_speed_report(rows):
             # only save latest value, each second
             if len(rows) == 0: return
-            self.client.job_action('streamJsonFile', ['.deepkit/speed.csv', [rows[-1]]])
+            self.client.job_action('streamFile', ['.deepkit/speed.metric', base64.b64encode(rows[-1]).decode('utf8')])
 
         self.speed_report_subject.pipe(buffer(interval(1))).subscribe(on_speed_report)
 
@@ -145,33 +146,24 @@ class Context:
         if deepkit.utils.in_self_execution:
             # the CLI handled output logging otherwise
             p = psutil.Process()
-            self.client.job_action(
-                'streamJsonFile',
-                [
-                    '.deepkit/hardware/main_0.csv',
-                    [
-                        [
-                            'time', 'cpu', 'memory', 'network_rx', 'network_tx',
-                            'block_write',
-                            'block_read'
-                        ]
-                    ]
-                ]
-            )
 
             def on_hardware_metrics(dummy):
                 net = psutil.net_io_counters()
                 disk = psutil.disk_io_counters()
-                data = [
+                data = struct.pack(
+                    '<BHdHHffff',
+                    1,
+                    0,
                     time.time(),
-                    (p.cpu_percent(interval=None) / 100) / psutil.cpu_count(),
-                    p.memory_percent() / 100,
-                    net.bytes_recv,
-                    net.bytes_sent,
-                    disk.write_bytes,
-                    disk.read_bytes,
-                ]
-                self.client.job_action('streamJsonFile', ['.deepkit/hardware/main_0.csv', [data]])
+                    int(((p.cpu_percent(interval=None) / 100) / psutil.cpu_count()) * 65535), # stretch to max precision of uint16
+                    int((p.memory_percent() / 100) * 65535),  # stretch to max precision of uint16
+                    float(net.bytes_recv),
+                    float(net.bytes_sent),
+                    float(disk.write_bytes),
+                    float(disk.read_bytes),
+                )
+
+                self.client.job_action('streamFile', ['.deepkit/hardware/main_0.hardware', base64.b64encode(data).decode('utf8')])
 
             interval(1).subscribe(on_hardware_metrics)
 
@@ -258,7 +250,9 @@ class Context:
             self.client.patch('secondsPerIteration', self.seconds_per_iteration)
 
         self.client.patch('speed', speed_per_second)
-        self.speed_report_subject.on_next([x, now, speed_per_second])
+
+        speed = struct.pack('<Bddd', 1, float(x), now, float(speed_per_second))
+        self.speed_report_subject.on_next(speed)
 
         if total:
             self.client.patch('steps', total)
@@ -267,7 +261,7 @@ class Context:
         self.client.patch('title', s)
 
     def set_info(self, name: str, value: any):
-        self.client.patch('infos.' + name, value)
+        self.client.patch('infos.' + str(name), value)
 
     def set_description(self, description: any):
         self.client.patch('description', description)
@@ -304,7 +298,11 @@ class Context:
         if not isinstance(y, list):
             y = [y]
 
-        self.metric_subject.on_next({'id': name, 'row': [x, time.time()] + y})
+        row_binary = struct.pack('<BHdd', 1, len(y), float(x), time.time())
+        for y1 in y:
+            row_binary += struct.pack('<d', float(y1) if y1 is not None else 0.0)
+
+        self.metric_subject.on_next({'id': name, 'row': row_binary})
         self.client.patch('channels.' + name + '.lastValue', y)
 
     def log(self, s: str):

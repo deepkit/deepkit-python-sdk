@@ -198,6 +198,9 @@ class Client(threading.Thread):
         if self.offline: return
         if self.stopping and not allow_in_shutdown: raise Exception('In shutdown: actions disallowed')
 
+        if not controller: raise Exception('No controller given')
+        if not action: raise Exception('No action given')
+
         res = await self._message({
             'name': 'action',
             'controller': controller,
@@ -264,8 +267,8 @@ class Client(threading.Thread):
                     await connection.send(json.dumps(m))
                     self.queue.remove(m)
             except Exception as e:
-                print("Failed sending, exit send_messages", e)
-                return
+                print("Failed sending, exit send_messages")
+                raise e
 
             if len(self.patches) > 0:
                 # we have to send first all messages/actions out
@@ -345,13 +348,6 @@ class Client(threading.Thread):
         if not res['result'] or res['result'] is not True:
             raise Exception('Job token invalid')
 
-        # load job controller
-        await self._message({
-            'name': 'action',
-            'controller': 'job',
-            'action': ''
-        }, lock=False)
-
         self.connecting.set_result(True)
         if self.connections > 0:
             print("Deepkit: Reconnected.")
@@ -399,10 +395,6 @@ class Client(threading.Thread):
             if not res['result']:
                 raise Exception('Login invalid')
 
-            deepkit_config_yaml = None
-            if self.options.config_path and os.path.exists(self.options.config_path):
-                deepkit_config_yaml = open(self.options.config_path, 'r', encoding='utf-8').read()
-
             if link:
                 projectId = link.projectId
             else:
@@ -417,7 +409,7 @@ class Client(threading.Thread):
 
                 projectId = project['id']
 
-            job = await self._action('app', 'createJob', [projectId, self.options.config_path, deepkit_config_yaml],
+            job = await self._action('app', 'createJob', [projectId],
                                      lock=False)
 
             deepkit.globals.loaded_job = job

@@ -1,9 +1,12 @@
 label: TF2 Keras Fashion Mnist
 image: tensorflow/tensorflow:latest-gpu-py3
-install:
+
+build:
     - pip install --upgrade pip
     - pip install -r requirements.txt
     - python -c 'from tensorflow.keras import datasets; datasets.fashion_mnist.load_data()'
+build_files:
+    - requirements.txt
 
 docker:
     binds:
@@ -11,8 +14,6 @@ docker:
     env:
         - PYTHONPATH=/deepkit-sdk
 
-install_files:
-    - requirements.txt
 
 ignore:
   - logs
