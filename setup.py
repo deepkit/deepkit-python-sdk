@@ -1,5 +1,6 @@
 from setuptools import setup
 from setuptools import find_packages
+
 __version__ = '0.1.4'
 
 setup(name='deepkit',
@@ -12,14 +13,15 @@ setup(name='deepkit',
       license='MIT',
       packages=find_packages(),
       install_requires=[
-                        'numpy',
-                        'cherrypy>=7.1.0',
-                        'six>=1.11.0',
-                        'Pillow>=4.0.0',
-                        'rx>=1.5',
-                        'typedload>=1.20'
-                        'PyYAML>=5.0.0',
-                        'psutil>=5.4.6',
-                        'websockets>=7.0',
-                        'simplejson>=3.13.2']
-)
+          'numpy',
+          'cherrypy>=7.1.0',
+          'six>=1.11.0',
+          'Pillow>=4.0.0',
+          'rx>=1.5',
+          'image',
+          'typedload>=1.20',
+          'PyYAML>=5.0.0',
+          'psutil>=5.4.6',
+          'websockets>=8.1',
+          'simplejson>=3.13.2'
+      ])

@@ -6,11 +6,10 @@ import signal
 import struct
 import time
 from threading import Lock
-from typing import Optional, List
+from typing import Optional, Callable
 
 import psutil
 from rx import interval
-from rx.operators import buffer
 from rx.subject import Subject
 
 import deepkit.client
@@ -45,19 +44,19 @@ class JobController:
 
 
 class JobDebuggerController:
-    def __init__(self):
-        self.watching_layers = {}
+    def __init__(self, client: deepkit.client.Client):
+        self.watching_layers = set()
+        self.client = client
         self.snapshot = Subject()
 
-    def debugSnapshot(self):
-        self.snapshot.on_next({'mode': 'all'})
+    async def connected(self):
+        await self._update_watching_layers()
 
-    def debugStopWatchLayer(self, id: str):
-        if id in self.watching_layers:
-            del self.watching_layers[id]
+    async def updateWatchingLayer(self):
+        await self._update_watching_layers()
 
-    def debugStartWatchLayer(self, id: str):
-        self.watching_layers[id] = True
+    async def _update_watching_layers(self):
+        self.watching_layers = set(await self.client.job_action('getDebugActiveLayerWatching'))
 
 
 class Context:
@@ -65,17 +64,17 @@ class Context:
         if options is None:
             options = ContextOptions()
 
+        self.metric_buffer = []
+        self.speed_buffer = []
+        self.logs_buffer = []
+        self.last_throttle_call = dict()
+
         self.client = deepkit.client.Client(options)
         deepkit.globals.last_context = self
         self.log_lock = Lock()
         self.defined_metrics = {}
-        self.log_subject = Subject()
-        self.metric_subject = Subject()
-        self.speed_report_subject = Subject()
         self.shutting_down = False
 
-        atexit.register(self.shutdown)
-        self.wait_for_connect()
 
         self.last_iteration_time = 0
         self.last_batch_time = 0
@@ -88,63 +87,31 @@ class Context:
         if deepkit.utils.in_self_execution():
             self.job_controller = JobController()
 
-        self.debugger_controller = JobDebuggerController()
+        self.debugger_controller = JobDebuggerController(self.client)
 
+        # runs in the client Thread
         def on_connect(connected):
             if connected:
                 if deepkit.utils.in_self_execution():
-                    asyncio.run_coroutine_threadsafe(
-                        self.client.register_controller('job/' + self.client.job_id, self.job_controller),
-                        self.client.loop
-                    )
+                    self.client.register_controller('job/' + self.client.job_id, self.job_controller)
 
-                asyncio.run_coroutine_threadsafe(
-                    self.client.register_controller('job/' + self.client.job_id + '/debugger',
-                                                    self.debugger_controller),
-                    self.client.loop
-                )
+                self.client.register_controller('job/' + self.client.job_id + '/debugger', self.debugger_controller)
+
+                asyncio.run_coroutine_threadsafe(self.debugger_controller.connected(), loop=self.client.loop)
 
         self.client.connected.subscribe(on_connect)
 
-        def on_metric(data: List):
-            if len(data) == 0: return
-
-            packed = {}
-            for d in data:
-                if d['id'] not in packed:
-                    packed[d['id']] = b''
-
-                packed[d['id']] += d['row']
-
-            for i, v in packed.items():
-                self.client.job_action('channelData', [i, base64.b64encode(v).decode('utf8')])
-
-        self.metric_subject.pipe(buffer(interval(1))).subscribe(on_metric)
-
-        def on_speed_report(rows):
-            # only save latest value, each second
-            if len(rows) == 0: return
-            self.client.job_action('streamFile', ['.deepkit/speed.metric', base64.b64encode(rows[-1]).decode('utf8')])
-
-        self.speed_report_subject.pipe(buffer(interval(1))).subscribe(on_speed_report)
+        atexit.register(self.shutdown)
+        self.client.connect()
+        self.wait_for_connect()
 
         if deepkit.utils.in_self_execution:
-            # the CLI handled output logging otherwise
-            def on_log(data: List):
-                if len(data) == 0: return
-                packed = ''
-                for d in data:
-                    packed += d
-
-                self.client.job_action('log', ['main_0', packed])
-
-            self.log_subject.pipe(buffer(interval(1))).subscribe(on_log)
-
+            # the CLI handles output logging
             if len(deepkit.globals.last_logs.getvalue()) > 0:
-                self.log_subject.on_next(deepkit.globals.last_logs.getvalue())
+                self.logs_buffer.append(deepkit.globals.last_logs.getvalue())
 
         if deepkit.utils.in_self_execution:
-            # the CLI handled output logging otherwise
+            # the CLI handles hardware monitoring
             p = psutil.Process()
 
             def on_hardware_metrics(dummy):
@@ -155,7 +122,8 @@ class Context:
                     1,
                     0,
                     time.time(),
-                    int(((p.cpu_percent(interval=None) / 100) / psutil.cpu_count()) * 65535), # stretch to max precision of uint16
+                    int(((p.cpu_percent(interval=None) / 100) / psutil.cpu_count()) * 65535),
+                    # stretch to max precision of uint16
                     int((p.memory_percent() / 100) * 65535),  # stretch to max precision of uint16
                     float(net.bytes_recv),
                     float(net.bytes_sent),
@@ -163,9 +131,59 @@ class Context:
                     float(disk.read_bytes),
                 )
 
-                self.client.job_action('streamFile', ['.deepkit/hardware/main_0.hardware', base64.b64encode(data).decode('utf8')])
+                self.client.job_action_threadsafe('streamFile',
+                                                  ['.deepkit/hardware/main_0.hardware', base64.b64encode(data).decode('utf8')])
 
-            interval(1).subscribe(on_hardware_metrics)
+            self.hardware_subscription = interval(1).subscribe(on_hardware_metrics)
+
+    def throttle_call(self, fn: Callable, delay: int = 1000):
+        last_time = self.last_throttle_call.get(fn)
+        if not last_time or (time.time() - (delay / 1000)) > last_time:
+            self.last_throttle_call[fn] = time.time()
+            fn()
+
+    def drain_speed_report(self):
+        # only save latest value, each second
+        if len(self.speed_buffer) == 0: return
+        item = self.speed_buffer[-1]
+        self.speed_buffer = []
+        self.client.job_action_threadsafe(
+            'streamFile',
+            ['.deepkit/speed.metric', base64.b64encode(item).decode('utf8')]
+        )
+
+    def drain_logs(self):
+        if len(self.logs_buffer) == 0: return
+        packed = ''
+        buffer = self.logs_buffer.copy()
+        self.logs_buffer = []
+        for d in buffer:
+            packed += d
+
+        self.client.job_action_threadsafe('log', ['main_0', packed])
+
+    def drain_metric_buffer(self):
+        if len(self.metric_buffer) == 0:
+            return
+        buffer = self.metric_buffer.copy()
+        self.metric_buffer = []
+
+        try:
+            packed = {}
+            items = {}
+            for d in buffer:
+                if d['id'] not in packed:
+                    packed[d['id']] = b''
+                    items[d['id']] = 0
+
+                items[d['id']] += 1
+                packed[d['id']] += d['row']
+
+            for i, v in packed.items():
+                # print('channelData', items[i], len(v) / 27)
+                self.client.job_action_threadsafe('channelData', [i, base64.b64encode(v).decode('utf8')])
+        except Exception as e:
+            print('on_metric failed', e)
 
     def wait_for_connect(self):
         async def wait():
@@ -176,9 +194,9 @@ class Context:
     def shutdown(self):
         if self.shutting_down: return
         self.shutting_down = True
-        self.metric_subject.on_completed()
-        self.log_subject.on_completed()
-
+        self.drain_metric_buffer()
+        self.drain_speed_report()
+        self.drain_logs()
         self.client.shutdown()
 
     def epoch(self, current: int, total: Optional[int]):
@@ -252,7 +270,8 @@ class Context:
         self.client.patch('speed', speed_per_second)
 
         speed = struct.pack('<Bddd', 1, float(x), now, float(speed_per_second))
-        self.speed_report_subject.on_next(speed)
+        self.speed_buffer.append(speed)
+        self.throttle_call(self.drain_logs)
 
         if total:
             self.client.patch('steps', total)
@@ -267,29 +286,29 @@ class Context:
         self.client.patch('description', description)
 
     def add_tag(self, tag: str):
-        self.client.job_action('addTag', [tag])
+        self.client.job_action_threadsafe('addTag', [tag])
 
     def rm_tag(self, tag: str):
-        self.client.job_action('rmTag', [tag])
+        self.client.job_action_threadsafe('rmTag', [tag])
 
     def set_parameter(self, name: str, value: any):
         self.client.patch('config.parameters.' + name, value)
 
     def define_metric(self, name: str, options: dict):
         self.defined_metrics[name] = {}
-        self.client.job_action('defineMetric', [name, options])
+        self.client.job_action_threadsafe('defineMetric', [name, options])
 
     def debug_snapshot(self, graph: dict):
-        self.client.job_action('debugSnapshot', [graph])
+        self.client.job_action_threadsafe('debugSnapshot', [graph])
 
     def add_file(self, path: str):
-        self.client.job_action('uploadFile', [path, base64.b64encode(open(path, 'rb').read()).decode('utf8')])
+        self.client.job_action_threadsafe('uploadFile', [path, base64.b64encode(open(path, 'rb').read()).decode('utf8')])
 
     def add_file_content(self, path: str, content: bytes):
-        self.client.job_action('uploadFile', [path, base64.b64encode(content).decode('utf8')])
+        self.client.job_action_threadsafe('uploadFile', [path, base64.b64encode(content).decode('utf8')])
 
     def set_model_graph(self, graph: dict):
-        self.client.job_action('setModelGraph', [graph])
+        self.client.job_action_threadsafe('setModelGraph', [graph])
 
     def metric(self, name: str, x, y):
         if name not in self.defined_metrics:
@@ -302,8 +321,10 @@ class Context:
         for y1 in y:
             row_binary += struct.pack('<d', float(y1) if y1 is not None else 0.0)
 
-        self.metric_subject.on_next({'id': name, 'row': row_binary})
-        self.client.patch('channels.' + name + '.lastValue', y)
+        self.client.patch('channelLastValues.' + name, y)
+        self.metric_buffer.append({'id': name, 'row': row_binary})
+        self.throttle_call(self.drain_metric_buffer)
 
     def log(self, s: str):
-        self.log_subject.on_next(s)
+        self.logs_buffer.append(s)
+        self.throttle_call(self.drain_logs);

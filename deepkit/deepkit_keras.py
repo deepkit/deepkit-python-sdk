@@ -6,6 +6,7 @@ import math
 import os
 import sys
 import time
+from struct import pack
 from uuid import uuid4
 
 import PIL.Image
@@ -63,6 +64,7 @@ class KerasCallback(keras.callbacks.Callback):
         self.debug_x = debug_x
 
         self.epoch = 0
+        self.batch = 0
 
         self.data_validation = None
         self.data_validation_size = None
@@ -75,8 +77,11 @@ class KerasCallback(keras.callbacks.Callback):
         self.loss_metric = None
         self.learning_rate_metric = None
 
+        self.live_debug_data_x = 0
+
         self.learning_rate_start = 0
         self.last_debug_sent = 0
+        self.last_live_futures = []
 
     def snapshot(self, options: dict):
         id = uuid4()
@@ -88,21 +93,24 @@ class KerasCallback(keras.callbacks.Callback):
         if options['mode'] is 'watching':
             layers = self.context.debugger_controller.watching_layers.copy()
 
-        self.context.client.job_action('jobDebugStartSnapshot', [
+        self.context.client.job_action_threadsafe('jobDebugStartSnapshot', [
             id,
             time.time(),
+            self.epoch,
+            self.batch,
             layers
         ])
 
         for layer_name in layers:
-            jpeg = self.get_image_from_layer(layer_name)
+            jpeg, activations = self.get_image_and_histogram_from_layer(layer_name)
             whistogram, bhistogram = self.get_weight_histogram_from_layer(layer_name)
 
-            self.context.client.job_action('jobDebugSnapshotLayer', [
+            self.context.client.job_action_threadsafe('jobDebugSnapshotLayer', [
                 id,
                 layer_name,
                 time.time(),
                 base64.b64encode(jpeg).decode(),
+                activations,
                 whistogram,
                 bhistogram,
             ])
@@ -111,26 +119,30 @@ class KerasCallback(keras.callbacks.Callback):
         super().set_model(model)
         self.context.set_model_graph(extract_model_graph(self.model))
 
-    def get_weight_histogram_from_layer(self, layer_name: str):
-        weights = self.model.get_layer(layer_name).get_weights()
-        w_dict = None
+    def get_weight_histogram_from_layer(self, x, layer_name: str):
+        layer_weights = self.model.get_layer(layer_name).get_weights()
+        weights = None
 
-        if len(weights) > 0:
-            w = np.histogram(weights[0])
-            w_dict = {'y': w[0].tolist(), 'x': w[1].tolist()}
+        if len(layer_weights) > 0:
+            h = np.histogram(layer_weights[0], bins=20)
+            # <version><x><bins><...x><...y>, little endian
+            # uint8|Uint32|Uint16|...Float32|...Uint32
+            # B|L|H|...f|...L
+            weights = pack('<BIH', 1, int(x), h[0].size) + h[1].astype('<f').tobytes() + h[0].astype('<I').tobytes()
 
-        b_dict = None
-        if len(weights) > 1:
-            b = np.histogram(weights[1])
-            b_dict = {'y': b[0].tolist(), 'x': b[1].tolist()}
+        biases = None
+        if len(layer_weights) > 1:
+            h = np.histogram(layer_weights[1], bins=20)
+            biases = pack('<BIH', 1, int(x), h[0].size) + h[1].astype('<f').tobytes() + h[0].astype('<I').tobytes()
 
-        return w_dict, b_dict
+        return weights, biases
 
-    def get_image_from_layer(self, layer_name: str):
+    def get_image_and_histogram_from_layer(self, x, layer_name: str):
         layer = self.model.get_layer(layer_name)
         model = Model(self.model.input, layer.output)
         y = model.predict(self.debug_x, steps=1)
         data = y[0]  # we pick only the first in the batch
+        h = np.histogram(data, bins=20)
 
         if isinstance(layer, (
                 keras.layers.Conv2D,
@@ -149,10 +161,16 @@ class KerasCallback(keras.callbacks.Callback):
             else:
                 image = self.make_image_from_dense(data)
 
-        return self.pil_image_to_jpeg(image)
+        histogram = pack('<BIH', 1, int(x), h[0].size) + h[1].astype('<f').tobytes() + h[0].astype('<I').tobytes()
 
-    def send_debug_data(self):
+        return self.pil_image_to_jpeg(image), histogram
+
+    def send_live_debug_data(self):
         if not self.context.debugger_controller:
+            return
+
+        # we don't send live debug data when not connected
+        if not self.context.client.is_connected():
             return
 
         if len(self.context.debugger_controller.watching_layers) == 0: return
@@ -160,17 +178,27 @@ class KerasCallback(keras.callbacks.Callback):
         if self.last_debug_sent and (time.time() - self.last_debug_sent) < 1:
             return
 
-        for layer_name in self.context.debugger_controller.watching_layers.copy():
-            jpeg = self.get_image_from_layer(layer_name)
-            whistogram, bhistogram = self.get_weight_histogram_from_layer(layer_name)
+        # wait for all previous to be sent first.
+        try:
+            for f in self.last_live_futures: f.result()
+        except Exception as e:
+            print('Failing sending debug data', e)
+            pass
 
-            self.context.client.job_action('jobAddDebugLayer', [
-                time.time(),
+        self.live_debug_data_x += 1
+
+        self.last_live_futures = []
+        for layer_name in self.context.debugger_controller.watching_layers.copy():
+            jpeg, activations = self.get_image_and_histogram_from_layer(self.live_debug_data_x, layer_name)
+            whistogram, bhistogram = self.get_weight_histogram_from_layer(self.live_debug_data_x, layer_name)
+
+            self.last_live_futures.append(self.context.client.job_action_threadsafe('addLiveLayerData', [
                 layer_name,
                 base64.b64encode(jpeg).decode(),
-                whistogram,
-                bhistogram,
-            ])
+                base64.b64encode(activations).decode() if activations else None,
+                base64.b64encode(whistogram).decode() if whistogram else None,
+                base64.b64encode(bhistogram).decode() if bhistogram else None,
+            ]))
 
         # print("debug data sent")
         self.last_debug_sent = time.time()
@@ -216,16 +244,6 @@ class KerasCallback(keras.callbacks.Callback):
         if 'samples' not in self.params and 'nb_sample' in self.params:
             self.params['samples'] = self.params['nb_sample']
 
-        xaxis = {
-            # 'range': [1, self.params['epochs']],
-            # 'title': u'Epoch ⇢'
-        }
-        yaxis = {
-            'tickformat': '%',
-            'hoverformat': '%',
-            'rangemode': 'tozero'
-        }
-
         traces = ['training', 'validation']
         if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
             traces = []
@@ -233,11 +251,9 @@ class KerasCallback(keras.callbacks.Callback):
                 traces.append('train_' + output.name)
                 traces.append('val_' + output.name)
 
-        self.accuracy_metric = deepkit.create_metric(
-            'accuracy', traces=traces, xaxis=xaxis, yaxis=yaxis
-        )
-        self.loss_metric = deepkit.create_loss_metric('loss', xaxis=xaxis)
-        self.learning_rate_metric = deepkit.create_metric('learning rate', traces=['start', 'end'], xaxis=xaxis)
+        self.accuracy_metric = deepkit.create_metric('accuracy', traces=traces)
+        self.loss_metric = deepkit.create_loss_metric('loss')
+        self.learning_rate_metric = deepkit.create_metric('learning rate', traces=['start', 'end'])
 
         deepkit.epoch(0, self.params['epochs'])
         if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
@@ -246,7 +262,7 @@ class KerasCallback(keras.callbacks.Callback):
                 loss_traces.append('train_' + output.name)
                 loss_traces.append('val_' + output.name)
 
-            self.all_losses = deepkit.create_metric('loss_all', xaxis=xaxis, traces=loss_traces)
+            self.all_losses = deepkit.create_metric('loss_all', traces=loss_traces)
 
         # if self.force_insights or self.job_model.insights_enabled:
         #     images = self.build_insight_images()
@@ -262,13 +278,14 @@ class KerasCallback(keras.callbacks.Callback):
 
             self.current['nb_batches'] = nb_batches
             self.current['batch_size'] = batch_size
+            self.batch = batch
             deepkit.set_info('Batch size', batch_size)
 
     def on_batch_end(self, batch, logs={}):
         self.filter_invalid_json_values(logs)
 
         deepkit.batch(batch + 1, self.current['nb_batches'], logs['size'])
-        self.send_debug_data()
+        self.send_live_debug_data()
 
     def on_epoch_begin(self, epoch, logs={}):
         self.epoch = epoch

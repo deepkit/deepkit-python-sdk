@@ -1,15 +1,21 @@
-label: Cifar10 Partial
+label: TF1 Keras Cifar10 Partial
 image: tensorflow/tensorflow:latest-gpu-py3
-install:
+build:
+    - pip install -e /deepkit-sdk/
     - pip install --upgrade pip
     - pip install -r requirements.txt
     - python -c 'from keras.datasets import cifar10; cifar10.load_data()'
 build_files:
     - requirements.txt
+    - ../../deepkit:/deepkit-sdk/deepkit
+    - ../../setup.py:/deepkit-sdk/setup.py
+
+ignore:
+    - '**/__pycache__/**'
+    - 'report.*'
+    - '**/logs/**'
 
 docker:
-    binds:
-        - "/Users/marc/bude/deepkit-python-sdk/:/deepkit-sdk"
     env:
         - PYTHONPATH=/deepkit-sdk
 

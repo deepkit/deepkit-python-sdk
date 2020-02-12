@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import threading
+from asyncio import Future
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -30,7 +31,6 @@ class Client(threading.Thread):
         self.connected = BehaviorSubject(False)
         self.options: ContextOptions = options
 
-        self.loop = asyncio.new_event_loop()
         self.host = os.environ.get('DEEPKIT_HOST', '127.0.0.1')
         self.port = int(os.environ.get('DEEPKIT_PORT', '8960'))
         self.token = os.environ.get('DEEPKIT_JOB_ACCESSTOKEN', None)
@@ -51,10 +51,15 @@ class Client(threading.Thread):
         self.loop = asyncio.new_event_loop()
         self.start()
 
+    def is_connected(self):
+        return self.connected.value
+
     def run(self):
         self.connecting = self.loop.create_future()
-        self.loop.create_task(self._connect())
         self.loop.run_forever()
+
+    def connect(self):
+        asyncio.run_coroutine_threadsafe(self._connect(), self.loop)
 
     def shutdown(self):
         if self.offline: return
@@ -103,10 +108,13 @@ class Client(threading.Thread):
 
         await self.connection.close()
 
-    async def register_controller(self, name: str, controller):
+    def register_controller(self, name: str, controller):
+        return asyncio.run_coroutine_threadsafe(self._register_controller(name, controller), self.loop)
+
+    async def _register_controller(self, name: str, controller):
         self.controllers[name] = controller
 
-        async def subscriber(message, done):
+        async def handle_peer_message(message, done):
             if message['type'] == 'error':
                 done()
                 del self.controllers[name]
@@ -154,7 +162,7 @@ class Client(threading.Thread):
 
                 if data['name'] == 'action':
                     try:
-                        res = getattr(controller, data['action'])(*data['args'])
+                        res = await getattr(controller, data['action'])(*data['args'])
 
                         await self._message({
                             'name': 'peerController/message',
@@ -176,6 +184,9 @@ class Client(threading.Thread):
                                      'error': str(e)}
                         }, no_response=True)
 
+        def subscriber(message, on_done):
+            self.loop.create_task(handle_peer_message(message, on_done))
+
         await self._subscribe({
             'name': 'peerController/register',
             'controllerName': name,
@@ -189,11 +200,14 @@ class Client(threading.Thread):
                 self.client._message({
                     'name': 'peerController/unregister',
                     'controllerName': name,
-                })
+                }, no_response=True)
 
         return Controller(self)
 
-    async def _action(self, controller: str, action: str, args: List, lock=True, allow_in_shutdown=False):
+    async def _action(self, controller: str, action: str, args=None, lock=True, allow_in_shutdown=False):
+        if args is None:
+            args = []
+
         if lock: await self.connecting
         if self.offline: return
         if self.stopping and not allow_in_shutdown: raise Exception('In shutdown: actions disallowed')
@@ -201,6 +215,7 @@ class Client(threading.Thread):
         if not controller: raise Exception('No controller given')
         if not action: raise Exception('No action given')
 
+        # print('> action', action, threading.current_thread().name)
         res = await self._message({
             'name': 'action',
             'controller': controller,
@@ -208,6 +223,8 @@ class Client(threading.Thread):
             'args': args,
             'timeout': 60
         }, lock=lock)
+
+        # print('< action', action)
 
         if res['type'] == 'next/json':
             return res['next'] if 'next' in res else None
@@ -218,7 +235,16 @@ class Client(threading.Thread):
 
         raise ApiError(f"Invalid action type '{res['type']}'. Not implemented")
 
-    def job_action(self, action: str, args: List):
+    async def job_action(self, action: str, args=None):
+        return await self._action('job', action, args)
+
+    def job_action_threadsafe(self, action: str, args=None) -> Future:
+        """
+        This method is non-blocking and every try to block-wait for an answers means
+        script execution stops when connection is broken (offline training entirely impossible).
+        So, we just schedule the call and return a Future, which the user can subscribe to.
+        """
+        if args is None: args = []
         return asyncio.run_coroutine_threadsafe(self._action('job', action, args), self.loop)
 
     async def _subscribe(self, message, subscriber):
@@ -232,8 +258,8 @@ class Client(threading.Thread):
         def on_done():
             del self.subscriber[message_id]
 
-        async def on_incoming_message(incoming_message):
-            await subscriber(incoming_message, on_done)
+        def on_incoming_message(incoming_message):
+            subscriber(incoming_message, on_done)
 
         self.subscriber[self.message_id] = on_incoming_message
         self.queue.append(message)
@@ -276,6 +302,7 @@ class Client(threading.Thread):
                 # patches are based on previously created entities,
                 # so we need to make sure those entities are created
                 # first before sending any patches.
+                # print('patches', self.patches)
                 try:
                     send = self.patches.copy()
                     await connection.send(json.dumps({
@@ -297,7 +324,7 @@ class Client(threading.Thread):
                     print("Patching failed. Syncing job data disabled.", file=sys.stderr)
                     return
 
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.5)
 
     async def handle_messages(self, connection):
         while not connection.closed:
@@ -312,7 +339,7 @@ class Client(threading.Thread):
 
             if res and 'id' in res:
                 if res['id'] in self.subscriber:
-                    await self.subscriber[res['id']](res)
+                    self.subscriber[res['id']](res)
 
                 if res['id'] in self.callbacks:
                     self.callbacks[res['id']].set_result(res)
@@ -367,9 +394,12 @@ class Client(threading.Thread):
             link: Optional[FolderLink] = None
             if self.options.account:
                 account_config = config.get_account_for_name(self.options.account)
-            else:
+            elif not self.options.project:
                 link = config.get_folder_link_of_directory(sys.path[0])
                 account_config = config.get_account_for_id(link.accountId)
+            else:
+                # default to localhost
+                account_config = config.get_account_for_name('localhost')
 
             self.host = account_config.host
             self.port = account_config.port
