@@ -13,6 +13,15 @@ def count_params(weights):
     return int(sum(np.prod(p.shape.as_list()) for p in weights))
 
 
+def layer_visitor(model, callback):
+    def walk(entry):
+        for layer in entry.layers:
+            callback(layer)
+            if isinstance(layer, Model):
+                walk(layer)
+    walk(model)
+
+
 def extract_model_graph(model):
     dk_graph = {'nodes': []}
 

@@ -6,9 +6,10 @@ import signal
 import struct
 import time
 from threading import Lock
-from typing import Optional, Callable
+from typing import Optional, Callable, NamedTuple, Dict
 
 import psutil
+import typedload
 from rx import interval
 from rx.subject import Subject
 
@@ -43,20 +44,34 @@ class JobController:
                 os.killpg(os.getpgid(os.getpid()), signal.SIGINT)
 
 
+class JobDebuggingState(NamedTuple):
+    watchingLayers: Dict[str, bool]
+    live: bool
+    recording: bool
+
+    # 'epoch' | 'second'
+    recordingMode: str
+
+    # 'watched' | 'all'
+    recordingLayers: str
+
+    recordingSecond: int
+
+
 class JobDebuggerController:
     def __init__(self, client: deepkit.client.Client):
-        self.watching_layers = set()
+        self.state: JobDebuggingState
         self.client = client
-        self.snapshot = Subject()
 
     async def connected(self):
         await self._update_watching_layers()
 
+    # registered RPC function
     async def updateWatchingLayer(self):
         await self._update_watching_layers()
 
     async def _update_watching_layers(self):
-        self.watching_layers = set(await self.client.job_action('getDebugActiveLayerWatching'))
+        self.state = typedload.load(await self.client.job_action('getDebuggingState'), JobDebuggingState)
 
 
 class Context:
@@ -74,7 +89,6 @@ class Context:
         self.log_lock = Lock()
         self.defined_metrics = {}
         self.shutting_down = False
-
 
         self.last_iteration_time = 0
         self.last_batch_time = 0
@@ -132,7 +146,8 @@ class Context:
                 )
 
                 self.client.job_action_threadsafe('streamFile',
-                                                  ['.deepkit/hardware/main_0.hardware', base64.b64encode(data).decode('utf8')])
+                                                  ['.deepkit/hardware/main_0.hardware',
+                                                   base64.b64encode(data).decode('utf8')])
 
             self.hardware_subscription = interval(1).subscribe(on_hardware_metrics)
 
@@ -285,11 +300,11 @@ class Context:
     def set_description(self, description: any):
         self.client.patch('description', description)
 
-    def add_tag(self, tag: str):
-        self.client.job_action_threadsafe('addTag', [tag])
+    def add_label(self, label_name: str):
+        self.client.job_action_threadsafe('addLabel', [label_name])
 
-    def rm_tag(self, tag: str):
-        self.client.job_action_threadsafe('rmTag', [tag])
+    def remove_label(self, label_name: str):
+        self.client.job_action_threadsafe('removeLabel', [label_name])
 
     def set_parameter(self, name: str, value: any):
         self.client.patch('config.parameters.' + name, value)
@@ -298,11 +313,13 @@ class Context:
         self.defined_metrics[name] = {}
         self.client.job_action_threadsafe('defineMetric', [name, options])
 
-    def debug_snapshot(self, graph: dict):
-        self.client.job_action_threadsafe('debugSnapshot', [graph])
+
+    # def debug_snapshot(self, graph: dict):
+    #     self.client.job_action_threadsafe('debugSnapshot', [graph])
 
     def add_file(self, path: str):
-        self.client.job_action_threadsafe('uploadFile', [path, base64.b64encode(open(path, 'rb').read()).decode('utf8')])
+        self.client.job_action_threadsafe('uploadFile',
+                                          [path, base64.b64encode(open(path, 'rb').read()).decode('utf8')])
 
     def add_file_content(self, path: str, content: bytes):
         self.client.job_action_threadsafe('uploadFile', [path, base64.b64encode(content).decode('utf8')])
