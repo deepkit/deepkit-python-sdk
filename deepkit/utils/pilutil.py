@@ -15,15 +15,9 @@ licenes in their package, so we used here only code with the MIT license.
 
 
 import numpy
-
-from numpy import (amin, amax, ravel, asarray, cast, arange, ones, newaxis,
+from PIL import Image
+from numpy import (amin, amax, ravel, asarray, arange, ones, newaxis,
                    transpose, iscomplexobj, uint8, issubdtype, array)
-
-try:
-    from PIL import Image, ImageFilter
-except ImportError:
-    import Image
-    import ImageFilter
 
 
 def fromimage(im, flatten=False, mode=None):

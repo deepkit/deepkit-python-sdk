@@ -2,16 +2,15 @@
 from __future__ import division
 
 import base64
+import io
 import math
 import os
 import sys
 import time
 from struct import pack
-from uuid import uuid4
 
 import PIL.Image
 import numpy as np
-import six
 
 if 'keras' in sys.modules:
     import keras
@@ -289,7 +288,7 @@ class KerasCallback(keras.callbacks.Callback):
         return img
 
     def pil_image_to_jpeg(self, image):
-        buffer = six.BytesIO()
+        buffer = io.BytesIO()
 
         image.save(buffer, format="JPEG", optimize=True, quality=70)
         return buffer.getvalue()

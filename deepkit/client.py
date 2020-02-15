@@ -361,6 +361,14 @@ class Client(threading.Thread):
             return
 
         self.loop.create_task(self.handle_messages(self.connection))
+
+        # on reconnect this sends all patches and queued messages as well before authentication
+        # is done, so we temp save those, do the authentication, and then let the client
+        # sync the queued stuff again
+        old_queue = self.queue.copy()
+        old_patches = self.patches.copy()
+        self.queue = []
+        self.patches = {}
         self.loop.create_task(self.send_messages(self.connection))
 
         res = await self._message({
@@ -374,6 +382,9 @@ class Client(threading.Thread):
 
         if not res['result'] or res['result'] is not True:
             raise Exception('Job token invalid')
+
+        self.queue = old_queue
+        self.patches = old_patches
 
         self.connecting.set_result(True)
         if self.connections > 0:
