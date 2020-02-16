@@ -15,9 +15,10 @@ GETATTR_KIND = 'prim::GetAttr'
 CLASSTYPE_KIND = 'ClassType'
 
 class NodeBase(object):
-    def __init__(self, debugName=None, inputs=None, scope=None, tensor_size=None, op_type='UnSpecified', attributes=''):
+    def __init__(self, debugName=None, inputs=None, scope=None, tensor_size=None, op_type='UnSpecified', attributes='', node=None):
         # TODO; Specify a __slots__ for this class or potentially
         # used namedtuple instead
+        self.node = node
         self.debugName = debugName
         self.inputs = inputs
         self.tensor_size = tensor_size
@@ -141,6 +142,7 @@ class GraphPy(object):
                                                       node.scopeName,
                                                       outputSize,
                                                       op_type=node.kind,
+                                                      node=node,
                                                       attributes=node.attributes)
 
         self.find_common_root()
@@ -257,4 +259,4 @@ def build_graph(model, args):
         raise e
 
     list_of_nodes = parse(graph, trace, args)
-    return list_of_nodes.nodes_io
+    return graph, list_of_nodes.nodes_io
