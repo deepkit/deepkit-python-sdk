@@ -19,56 +19,70 @@ def extract_attributes(module):
     return res
 
 
+scope_name_prog = re.compile(r'^([a-zA-Z0-9_\-]+)/')
 short_name_prog = re.compile(r'\[([a-zA-Z0-9]+)\]')
 is_variable = re.compile(r'/([a-zA-Z_0-9]+(?:\.[0-9]+)?)$')
 
 
 def get_layer_id(name: str):
     """
-    Takes a name like 'ResNet/Conv2d[conv1]/1504' and converts it back to
-    the name from named_modules method, e.g. conv1
+    Takes a name like 'ResNet/Conv2d[conv1]/1504' and converts it to a shorter version
+
     Examples
         1. 'ResNet/Sequential[layer1]/BasicBlock[1]/Conv2d[conv2]/1658'
-        -> layer1.1.conv2
+        -> layer1.1.conv2/1657
         2. 'ResNet/Sequential[layer2]/BasicBlock[0]/BatchNorm2d[bn1]/1714'
-        -> layer2.0.bn1
+        -> layer2.0.bn1/1714
         3. 'ResNet/Sequential[layer1]/BasicBlock[0]/input.4'
         -> layer1.0/input.4
+        4. 'input/input.1'
+        -> input-1
+        5. 'output/output.1'
+        -> output-1
     """
     res = short_name_prog.findall(name)
     var = is_variable.search(name)
     if not res:
-        return name, False
+        return name
     if var:
-        return '.'.join(res) + '/' + var.group(1), True
-    return '.'.join(res), False
+        return '.'.join(res) + '/' + var.group(1)
+    return '.'.join(res)
 
 
-def get_short_layer_id(name: str):
+def get_scope_id(name: str):
     """
-    Takes a name like 'ResNet/Conv2d[conv1]/1504' and converts it back to
-    the name from named_modules method, e.g. conv1
+    Takes a name like 'ResNet/Conv2d[conv1]/1504' and converts it to
+    its scope variant, which could be later used for `named_modules` method.
     Examples
         1. 'ResNet/Sequential[layer1]/BasicBlock[1]/Conv2d[conv2]/1658'
-        -> layer1.1.conv2
+        -> Resnet.layer1.1.conv2
         2. 'ResNet/Sequential[layer2]/BasicBlock[0]/BatchNorm2d[bn1]/1714'
-        -> layer2.0.bn1
+        -> Resnet.layer2.0.bn1
+        2. 'ResNet/Sequential[layer2]/BasicBlock[0]/BatchNorm2d[bn1]/input.2'
+        -> Resnet.layer2.0.bn1
         3. 'ResNet/Sequential[layer1]/BasicBlock[0]/input.4'
-        -> layer1.0
+        -> Resnet.layer1.0
+        3. 'ResNet/x.1'
+        -> Resnet.x
     """
     res = short_name_prog.findall(name)
     if not res:
-        return name
-    return '.'.join(res)
+        # no groups mean its something like Resnet/x.2, which we normalize to Resnet
+        return name.split('/')[0]
+
+    scope = scope_name_prog.findall(name)
+
+    return scope[0] + '.' + ('.'.join(res))
 
 
 def get_pytorch_graph(net, x):
     names_from_id = dict()
-    names_is_variable = dict()
     nodes_from_id = dict()
     names_from_debug = dict()
-    names_short_from_debug = dict()
-    names_to_short = dict()
+    scopes_from_debug = dict()
+    names_to_scope = dict()
+    scope_nodes = dict()
+    # names_to_scope = dict()
 
     container_names = dict()
     known_modules_map = dict()
@@ -76,7 +90,7 @@ def get_pytorch_graph(net, x):
 
     torch_graph, torch_nodes = build_graph(net, x)
 
-    for name, module in net.named_modules():
+    for name, module in net.named_modules(prefix=type(net).__name__):
         known_modules_map[module] = name
         known_modules_name_map[name] = module
 
@@ -95,15 +109,20 @@ def get_pytorch_graph(net, x):
         if node.kind == 'prim::Constant': continue
         if node.kind == 'prim::GetAttr': continue
         if node.kind == 'prim::ListConstruct': continue
+        if node.kind == 'aten::t': continue
 
-        layer_id, is_variable = get_layer_id(node.debugName)
-        if is_variable:
-            names_is_variable[layer_id] = node
+        layer_id = get_layer_id(node.debugName)
+        scope_id = get_scope_id(node.debugName)
         names_from_id[layer_id] = node.debugName
         nodes_from_id[layer_id] = node
         names_from_debug[node.debugName] = layer_id
-        names_short_from_debug[node.debugName] = get_short_layer_id(node.debugName)
-        names_to_short[layer_id] = names_short_from_debug[node.debugName]
+        scopes_from_debug[node.debugName] = scope_id
+        names_to_scope[layer_id] = scopes_from_debug[node.debugName]
+        if scope_id not in scope_nodes:
+            scope_nodes[scope_id] = [layer_id]
+        else:
+            scope_nodes[scope_id].append(layer_id)
+        # names_to_scope[layer_id] = get_scope_name(node.debugName)
 
     edges = dict()
     edges_internal = dict()
@@ -111,7 +130,7 @@ def get_pytorch_graph(net, x):
     for node in torch_nodes.values():
         if node.debugName not in names_from_debug: continue
         layer_id = names_from_debug[node.debugName]
-        short_layer_id = names_short_from_debug[node.debugName]
+        short_layer_id = scopes_from_debug[node.debugName]
 
         print(node.debugName, '=>', layer_id, short_layer_id, node.kind)
         for parent in get_parent_names(layer_id):
@@ -123,7 +142,7 @@ def get_pytorch_graph(net, x):
 
             if input in names_from_debug and layer_id != names_from_debug[input] \
                     and short_layer_id != names_from_debug[input]:
-                print('   outgoing', names_from_debug[input], names_short_from_debug[input], input)
+                print('   outgoing', names_from_debug[input], scopes_from_debug[input], input)
                 # this node points out of itself, so create an edge
                 edge_to = names_from_debug[input]
 
@@ -134,12 +153,12 @@ def get_pytorch_graph(net, x):
 
     def resolve_edges_to_known_layer(from_layer: str, inputs: Set[str]) -> List[str]:
         new_inputs = set()
-        short_name = names_to_short[from_layer] if from_layer in names_to_short else None
+        short_name = names_to_scope[from_layer] if from_layer in names_to_scope else None
         parent_name = get_parent(short_name) if short_name else None
 
         # parent_layer = get_parent(from_layer)
         for input in inputs:
-            input_short_name = names_to_short[input] if input in names_to_short else None
+            input_short_name = names_to_scope[input] if input in names_to_scope else None
 
             # we skip connection where even the 2. parent is not the same or a child of from_layer.
             # we could make this configurable.
@@ -161,53 +180,10 @@ def get_pytorch_graph(net, x):
 
         return list(new_inputs)
 
-    # edges_resolved = dict()
-    # shapes = dict()
-    # short_name_to_id = dict()
-
-    # # we resolve the edges only from known layers
-    # for [name, inputs] in edges.items():
-    #     # first name=layer2.0/input.1 => layer2.0
-    #     short_name = name
-    #     if name in names_to_short:
-    #         short_name = names_to_short[name]
-    #
-    #     if short_name not in known_modules_name_map and name not in names_is_variable: continue
-    #     # if short_name in edges_resolved: continue
-    #
-    #     shapes[short_name] = nodes_from_id[name].tensor_size
-    #     short_name_to_id[short_name] = name
-    #     edges_resolved[short_name] = resolve_edges_to_known_layer(name, inputs)
-    #
     deepkit_nodes = []
 
-    # for [name, inputs] in edges_resolved.items():
-    #     module = known_modules_name_map[name]
-    #     node = {
-    #         'id': name,
-    #         'label': name,
-    #         'type': type(module).__name__,
-    #         'input': inputs,
-    #         'attributes': extract_attributes(module),
-    #         'internalInputs': list(edges[short_name_to_id[name]]),
-    #         'shape': shapes[name]
-    #     }
-    #     deepkit_nodes.append(node)
-    #
-    # allowed_torch_kinds = {
-    #     'add', 'div', 'mul', 'add_', 'div_', 'mul_'
-    #     'relu', 'sigmoid',
-    #     'threshold'
-    # }
-
-    # for torch_node in torch_graph.outputs():
-    #     print(torch_node.debugName, torch_node.kind)
-    #     pass
-
-    # we start from all outputs and go backwards, all visited input nodes are
-    # collected. We are interested in only nodes that are in the actual graph
-    # of outputs.
     nodes_names_to_display = set()
+    scopes = dict()
 
     def collect_inputs(inputs):
         for input in inputs:
@@ -220,17 +196,24 @@ def get_pytorch_graph(net, x):
             nodes_names_to_display.add(name)
             collect_inputs(inputs)
 
+    graph_inputs = []
+    graph_outputs = []
+
     for name in nodes_names_to_display:
         inputs = edges[name] if name in edges else []
-    # for [name, inputs] in edges.items():
+        # for [name, inputs] in edges.items():
         torch_node = nodes_from_id[name]
-        short_name = names_to_short[name]
+        scope_name = names_to_scope[name]
 
         filterer_inputs = []
+        if name.startswith('input/input'):
+            graph_inputs.append(name)
+        if name.startswith('output/output'):
+            graph_outputs.append(name)
 
         for input in inputs:
-            second_parent = get_parent(names_to_short[input], 2)
-            if second_parent and not short_name.startswith(second_parent):
+            second_parent = get_parent(names_to_scope[input], 2)
+            if second_parent and not scope_name.startswith(second_parent):
                 continue
             if input.startswith('input/input'):
                 filterer_inputs.append(input)
@@ -238,13 +221,24 @@ def get_pytorch_graph(net, x):
             if input in edges: filterer_inputs.append(input)
 
         attributes = {}
-        node_type = torch_node.kind
-        # that only works when we detected that short_name is unique
-        # means that there is only one name that points to short_name. or should we always pick the latest?
-        # dunno
-        # if short_name in known_modules_name_map:
-        #     extract_attributes(known_modules_name_map[short_name])
-        #     node_type = type(known_modules_name_map[short_name]).__name__
+        node_type = str(torch_node.kind)
+        node_label = name
+        op = ''
+
+        scope_id = scope_name
+
+        if len(scope_nodes[scope_name]) == 1 and scope_name in known_modules_name_map:
+            # this node is at the same time a scope, since it only has one
+            # node.
+            node_label = scope_name
+            module = known_modules_name_map[scope_name]
+            node_type = type(module).__name__
+            scope_id = get_parent(scope_name)
+            attributes = extract_attributes(module)
+        else:
+            if node_type.startswith('aten::'):
+                node_type = 'op'
+                op = node_type.replace('aten::', '').replace('_', '')
 
         attributes['torch.debugName'] = torch_node.debugName
         attributes['torch.kind'] = torch_node.kind
@@ -252,19 +246,37 @@ def get_pytorch_graph(net, x):
 
         node = {
             'id': name,
-            'label': name,
+            'label': node_label,
             'type': node_type,
+            'op': op,
             'input': filterer_inputs,
             'attributes': attributes,
-            # 'internalInputs': list(edges[short_name_to_id[name]]),
-            'shapes': torch_node.tensor_size,
-            # 'shape': shapes[name]
+            'recordable': False,
+            'scope': scope_id.replace('.', '/'),
+            'shape': torch_node.tensor_size,
         }
         deepkit_nodes.append(node)
 
+    for name, module in known_modules_name_map.items():
+
+        # skip modules that are already added as nodes
+        if name in scope_nodes and len(scope_nodes[name]) == 1: continue
+
+        scope_id = name.replace('.', '/')
+        scope = {
+            'id': scope_id,
+            'label': scope_id,
+            'type': type(module).__name__,
+            'recordable': True,
+            'attributes': extract_attributes(module)
+        }
+        scopes[scope_id] = scope
 
     graph = {
-        'nodes': deepkit_nodes
+        'nodes': deepkit_nodes,
+        'scopes': scopes,
+        'inputs': graph_inputs,
+        'outputs': graph_outputs,
     }
 
     return graph
