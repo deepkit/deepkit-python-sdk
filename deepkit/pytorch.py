@@ -196,8 +196,19 @@ def get_pytorch_graph(net, x):
             nodes_names_to_display.add(name)
             collect_inputs(inputs)
 
-    graph_inputs = []
-    graph_outputs = []
+
+    activation_functions = {
+        'ReLU6'.lower(),
+        'LogSigmoid'.lower(),
+        'LeakyReLU'.lower(),
+        'MultiheadAttention'.lower(),
+        'elu', 'hardshrink', 'hardtanh', 'leaky_relu', 'logsigmoid', 'prelu',
+        'rrelu', 'relu',
+        'sigmoid', 'elu', 'celu', 'selu', 'glu', 'gelu', 'softplus', 'softshrink', 'softsign',
+        'tanh', 'tanhshrink',
+        'softmin', 'softmax', 'softmax2d', 'log_softmax', 'LogSoftmax'.lower(),
+        'AdaptiveLogSoftmaxWithLoss'.lower()
+    }
 
     for name in nodes_names_to_display:
         inputs = edges[name] if name in edges else []
@@ -205,53 +216,63 @@ def get_pytorch_graph(net, x):
         torch_node = nodes_from_id[name]
         scope_name = names_to_scope[name]
 
+        node_type = 'layer'
+
         filterer_inputs = []
         if name.startswith('input/input'):
-            graph_inputs.append(name)
+            node_type = 'input'
         if name.startswith('output/output'):
-            graph_outputs.append(name)
+            node_type = 'output'
 
         for input in inputs:
-            second_parent = get_parent(names_to_scope[input], 2)
-            if second_parent and not scope_name.startswith(second_parent):
-                continue
+            # second_parent = get_parent(names_to_scope[input], 2)
+            # if second_parent and not scope_name.startswith(second_parent):
+            #     continue
             if input.startswith('input/input'):
                 filterer_inputs.append(input)
                 continue
             if input in edges: filterer_inputs.append(input)
 
         attributes = {}
-        node_type = str(torch_node.kind)
+        node_sub_type = ''
         node_label = name
-        op = ''
 
         scope_id = scope_name
+        recordable = False
 
         if len(scope_nodes[scope_name]) == 1 and scope_name in known_modules_name_map:
-            # this node is at the same time a scope, since it only has one
-            # node.
+            # this node is at the same time a module(and thus scope), since it only has one node.
+            recordable = True
             node_label = scope_name
             module = known_modules_name_map[scope_name]
-            node_type = type(module).__name__
+            node_sub_type = type(module).__name__
             scope_id = get_parent(scope_name)
             attributes = extract_attributes(module)
         else:
-            if node_type.startswith('aten::'):
+            if str(torch_node.kind).startswith('aten::'):
                 node_type = 'op'
-                op = node_type.replace('aten::', '').replace('_', '')
+                node_sub_type = torch_node.kind.replace('aten::', '').strip('_')
+
+        if node_sub_type.lower() in activation_functions:
+            node_type = 'activation'
+            node_sub_type = node_sub_type
 
         attributes['torch.debugName'] = torch_node.debugName
         attributes['torch.kind'] = torch_node.kind
         attributes['torch.inputs'] = torch_node.inputs
 
+        # source = str(torch_node.node.debugName).split(' # ')[1].strip() \
+        #     if hasattr(torch_node.node, 'debugName') and ' # ' in str(torch_node.node.debugName) else None
+
         node = {
             'id': name,
             'label': node_label,
             'type': node_type,
-            'op': op,
+            'subType': node_sub_type,
+            # 'source': source,
             'input': filterer_inputs,
             'attributes': attributes,
-            'recordable': False,
+            'recordable': recordable,
             'scope': scope_id.replace('.', '/'),
             'shape': torch_node.tensor_size,
         }
@@ -266,7 +287,7 @@ def get_pytorch_graph(net, x):
         scope = {
             'id': scope_id,
             'label': scope_id,
-            'type': type(module).__name__,
+            'subType': type(module).__name__,
             'recordable': True,
             'attributes': extract_attributes(module)
         }
@@ -275,8 +296,6 @@ def get_pytorch_graph(net, x):
     graph = {
         'nodes': deepkit_nodes,
         'scopes': scopes,
-        'inputs': graph_inputs,
-        'outputs': graph_outputs,
     }
 
     return graph
