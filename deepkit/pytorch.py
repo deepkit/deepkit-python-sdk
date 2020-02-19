@@ -1,7 +1,16 @@
+import base64
+import io
+import math
 import re
-from typing import Set, List
+from struct import pack
 
+import PIL
+import numpy as np
+
+import deepkit.context
 from deepkit.pytorch_graph import build_graph
+from deepkit.utils import array_to_img
+from deepkit.utils.image import get_layer_vis_square, get_image_tales
 
 blacklist_attributes = {'weight', 'dump_patches'}
 
@@ -20,8 +29,8 @@ def extract_attributes(module):
 
 
 scope_name_prog = re.compile(r'^([a-zA-Z0-9_\-]+)/')
-short_name_prog = re.compile(r'\[([a-zA-Z0-9]+)\]')
-is_variable = re.compile(r'/([a-zA-Z_0-9]+(?:\.[0-9]+)?)$')
+short_name_prog = re.compile(r'\[([a-zA-Z0-9_]+)\]')
+is_variable = re.compile(r'/([a-zA-Z0-9_]+(?:\.[0-9]+)?)$')
 
 
 def get_layer_id(name: str):
@@ -75,7 +84,7 @@ def get_scope_id(name: str):
     return scope[0] + '.' + ('.'.join(res))
 
 
-def get_pytorch_graph(net, x):
+def get_pytorch_graph(net, inputs):
     names_from_id = dict()
     nodes_from_id = dict()
     names_from_debug = dict()
@@ -88,7 +97,7 @@ def get_pytorch_graph(net, x):
     known_modules_map = dict()
     known_modules_name_map = dict()
 
-    torch_graph, torch_nodes = build_graph(net, x)
+    torch_graph, torch_nodes = build_graph(net, inputs)
 
     for name, module in net.named_modules(prefix=type(net).__name__):
         known_modules_map[module] = name
@@ -108,11 +117,21 @@ def get_pytorch_graph(net, x):
     for node in torch_nodes.values():
         if node.kind == 'prim::Constant': continue
         if node.kind == 'prim::GetAttr': continue
-        if node.kind == 'prim::ListConstruct': continue
-        if node.kind == 'aten::t': continue
-
         layer_id = get_layer_id(node.debugName)
         scope_id = get_scope_id(node.debugName)
+
+        if node.kind == 'prim::ListConstruct':
+            # if that list constrcutor has only inputs of the same scope, ignore it
+            all_scope = True
+            for input in node.inputs:
+                if get_scope_id(input) != scope_id:
+                    all_scope = False
+                    break
+            if all_scope:
+                continue
+
+        # if node.kind == 'aten::t': continue
+
         names_from_id[layer_id] = node.debugName
         nodes_from_id[layer_id] = node
         names_from_debug[node.debugName] = layer_id
@@ -122,7 +141,6 @@ def get_pytorch_graph(net, x):
             scope_nodes[scope_id] = [layer_id]
         else:
             scope_nodes[scope_id].append(layer_id)
-        # names_to_scope[layer_id] = get_scope_name(node.debugName)
 
     edges = dict()
     edges_internal = dict()
@@ -132,7 +150,7 @@ def get_pytorch_graph(net, x):
         layer_id = names_from_debug[node.debugName]
         short_layer_id = scopes_from_debug[node.debugName]
 
-        print(node.debugName, '=>', layer_id, short_layer_id, node.kind)
+        print(node.debugName, '=>', layer_id, short_layer_id, node.kind, node.tensor_size)
         for parent in get_parent_names(layer_id):
             container_names[parent] = True
 
@@ -142,7 +160,8 @@ def get_pytorch_graph(net, x):
 
             if input in names_from_debug and layer_id != names_from_debug[input] \
                     and short_layer_id != names_from_debug[input]:
-                print('   outgoing', names_from_debug[input], scopes_from_debug[input], input)
+                print('   outgoing', names_from_debug[input], scopes_from_debug[input], input,
+                      nodes_from_id[names_from_debug[input]].kind)
                 # this node points out of itself, so create an edge
                 edge_to = names_from_debug[input]
 
@@ -151,34 +170,34 @@ def get_pytorch_graph(net, x):
                 else:
                     edges[layer_id] = set([edge_to])
 
-    def resolve_edges_to_known_layer(from_layer: str, inputs: Set[str]) -> List[str]:
-        new_inputs = set()
-        short_name = names_to_scope[from_layer] if from_layer in names_to_scope else None
-        parent_name = get_parent(short_name) if short_name else None
-
-        # parent_layer = get_parent(from_layer)
-        for input in inputs:
-            input_short_name = names_to_scope[input] if input in names_to_scope else None
-
-            # we skip connection where even the 2. parent is not the same or a child of from_layer.
-            # we could make this configurable.
-            second_parent = get_parent(input_short_name, 2)
-            if second_parent and short_name and not short_name.startswith(second_parent):
-                continue
-
-            if input_short_name and short_name and short_name != input_short_name and input_short_name in known_modules_name_map:
-                if not parent_name or (parent_name != input_short_name):
-                    new_inputs.add(input_short_name)
-                    continue
-
-            if input in edges:
-                for i in resolve_edges_to_known_layer(from_layer, edges[input]):
-                    new_inputs.add(i)
-            else:
-                # we let it as is
-                new_inputs.add(input)
-
-        return list(new_inputs)
+    # def resolve_edges_to_known_layer(from_layer: str, inputs: Set[str]) -> List[str]:
+    #     new_inputs = set()
+    #     short_name = names_to_scope[from_layer] if from_layer in names_to_scope else None
+    #     parent_name = get_parent(short_name) if short_name else None
+    #
+    #     # parent_layer = get_parent(from_layer)
+    #     for input in inputs:
+    #         input_short_name = names_to_scope[input] if input in names_to_scope else None
+    #
+    #         # we skip connection where even the 2. parent is not the same or a child of from_layer.
+    #         # we could make this configurable.
+    #         second_parent = get_parent(input_short_name, 2)
+    #         if second_parent and short_name and not short_name.startswith(second_parent):
+    #             continue
+    #
+    #         if input_short_name and short_name and short_name != input_short_name and input_short_name in known_modules_name_map:
+    #             if not parent_name or (parent_name != input_short_name):
+    #                 new_inputs.add(input_short_name)
+    #                 continue
+    #
+    #         if input in edges:
+    #             for i in resolve_edges_to_known_layer(from_layer, edges[input]):
+    #                 new_inputs.add(i)
+    #         else:
+    #             # we let it as is
+    #             new_inputs.add(input)
+    #
+    #     return list(new_inputs)
 
     deepkit_nodes = []
 
@@ -187,15 +206,45 @@ def get_pytorch_graph(net, x):
 
     def collect_inputs(inputs):
         for input in inputs:
-            nodes_names_to_display.add(input)
-            if input in edges:
-                collect_inputs(edges[input])
+            if input not in nodes_names_to_display:
+                nodes_names_to_display.add(input)
+                if input in edges:
+                    collect_inputs(edges[input])
 
-    for [name, inputs] in edges.items():
-        if name.startswith('output/output.'):
-            nodes_names_to_display.add(name)
-            collect_inputs(inputs)
+    def find_outputs(name: str, outputs: set):
+        kind = nodes_from_id[name].kind
 
+        if kind == 'IO Node' and len(edges[name]) != 1:
+            # an IO node with multiple inputs is probably correct already
+            outputs.add(name)
+            return
+
+        if kind == 'IO Node' or kind == 'prim::TupleConstruct':
+            # resolve inputs
+            for input in edges[name]:
+                find_outputs(input, outputs)
+        else:
+            outputs.add(name)
+
+    for name in edges.copy().keys():
+        if name.startswith('output/'):
+            collect_inputs(edges[name])
+
+            # resolve first to first nodes with available shape, and then use those as output
+            # this is necessary since tuple outputs come via prim::TupleConstruct and no shape.
+            found_outputs = set()
+            find_outputs(name, found_outputs)
+            i = 0
+            print('found new outputs', name, found_outputs)
+
+            for output in found_outputs:
+                i += 1
+                new_name = 'output/output.' + str(i)
+                edges[new_name] = edges[name]
+                nodes_from_id[new_name] = nodes_from_id[output]
+                names_to_scope[new_name] = ''
+
+                nodes_names_to_display.add(new_name)
 
     activation_functions = {
         'ReLU6'.lower(),
@@ -210,56 +259,69 @@ def get_pytorch_graph(net, x):
         'AdaptiveLogSoftmaxWithLoss'.lower()
     }
 
+    input_names = []
+    output_names = []
+
+    record_map = dict()
     for name in nodes_names_to_display:
         inputs = edges[name] if name in edges else []
         # for [name, inputs] in edges.items():
         torch_node = nodes_from_id[name]
         scope_name = names_to_scope[name]
+        if not name:
+            raise Exception('No name given')
 
         node_type = 'layer'
+        scope_id = scope_name
+        recordable = False
 
-        filterer_inputs = []
-        if name.startswith('input/input'):
+        # filterer_inputs = []
+        if name.startswith('input/'):
+            recordable = True
             node_type = 'input'
-        if name.startswith('output/output'):
-            node_type = 'output'
+            input_names.append(name)
 
-        for input in inputs:
-            # second_parent = get_parent(names_to_scope[input], 2)
-            # if second_parent and not scope_name.startswith(second_parent):
-            #     continue
-            if input.startswith('input/input'):
-                filterer_inputs.append(input)
-                continue
-            if input in edges: filterer_inputs.append(input)
+        if name.startswith('output/'):
+            recordable = True
+            node_type = 'output'
+            output_names.append(name)
+
+        # for input in inputs:
+        #     # second_parent = get_parent(names_to_scope[input], 2)
+        #     # if second_parent and not scope_name.startswith(second_parent):
+        #     #     continue
+        #     if input.startswith('input/input'):
+        #         filterer_inputs.append(input)
+        #         continue
+        #     if input in edges: filterer_inputs.append(input)
 
         attributes = {}
         node_sub_type = ''
         node_label = name
 
-        scope_id = scope_name
-        recordable = False
+        if node_type != 'output':
+            if scope_name and scope_name in scope_nodes and len(
+                    scope_nodes[scope_name]) == 1 and scope_name in known_modules_name_map:
+                # this node is at the same time a module(and thus scope), since it only has one node.
+                recordable = True
+                record_map[scope_name] = name
+                node_label = scope_name
+                module = known_modules_name_map[scope_name]
+                node_sub_type = type(module).__name__
+                scope_id = get_parent(scope_name)
+                attributes = extract_attributes(module)
+            else:
+                if str(torch_node.kind).startswith('aten::'):
+                    node_type = 'op'
+                    node_sub_type = torch_node.kind.replace('aten::', '').strip('_')
 
-        if len(scope_nodes[scope_name]) == 1 and scope_name in known_modules_name_map:
-            # this node is at the same time a module(and thus scope), since it only has one node.
-            recordable = True
-            node_label = scope_name
-            module = known_modules_name_map[scope_name]
-            node_sub_type = type(module).__name__
-            scope_id = get_parent(scope_name)
-            attributes = extract_attributes(module)
-        else:
-            if str(torch_node.kind).startswith('aten::'):
-                node_type = 'op'
-                node_sub_type = torch_node.kind.replace('aten::', '').strip('_')
-
-        if node_sub_type.lower() in activation_functions:
-            node_type = 'activation'
-            node_sub_type = node_sub_type
+            if node_sub_type.lower() in activation_functions:
+                node_type = 'activation'
+                node_sub_type = node_sub_type
 
         attributes['torch.debugName'] = torch_node.debugName
         attributes['torch.kind'] = torch_node.kind
-        attributes['torch.inputs'] = torch_node.inputs
+        attributes['torch.inputs'] = ', '.join(torch_node.inputs)
 
         # source = str(torch_node.node.debugName).split(' # ')[1].strip() \
         #     if hasattr(torch_node.node, 'debugName') and ' # ' in str(torch_node.node.debugName) else None
@@ -270,7 +332,7 @@ def get_pytorch_graph(net, x):
             'type': node_type,
             'subType': node_sub_type,
             # 'source': source,
-            'input': filterer_inputs,
+            'input': list(inputs),
             'attributes': attributes,
             'recordable': recordable,
             'scope': scope_id.replace('.', '/'),
@@ -281,14 +343,20 @@ def get_pytorch_graph(net, x):
     for name, module in known_modules_name_map.items():
 
         # skip modules that are already added as nodes
-        if name in scope_nodes and len(scope_nodes[name]) == 1: continue
+        if name in scope_nodes and len(scope_nodes[name]) == 1:
+            continue
 
         scope_id = name.replace('.', '/')
+        record_map[name] = scope_id
+
+        # the root scope is not recordable. For that we have global input and outputs
+        recordable = '/' in scope_id
+
         scope = {
             'id': scope_id,
             'label': scope_id,
             'subType': type(module).__name__,
-            'recordable': True,
+            'recordable': recordable,
             'attributes': extract_attributes(module)
         }
         scopes[scope_id] = scope
@@ -298,4 +366,137 @@ def get_pytorch_graph(net, x):
         'scopes': scopes,
     }
 
-    return graph
+    return graph, record_map, input_names, output_names
+
+
+def watch_torch_model(context: deepkit.Context, net, graph_name: str, resolve_map):
+    known_modules_map = dict()
+    known_modules_name_map = dict()
+
+    for name, module in net.named_modules(prefix=type(net).__name__):
+        known_modules_map[module] = name
+        known_modules_name_map[name] = module
+
+    def pil_image_to_jpeg(image):
+        buffer = io.BytesIO()
+
+        image.save(buffer, format="JPEG", optimize=True, quality=70)
+        return buffer.getvalue()
+
+    def make_image_from_dense(neurons):
+        cols = int(math.ceil(math.sqrt(len(neurons))))
+
+        even_length = cols * cols
+        diff = even_length - len(neurons)
+        if diff > 0:
+            neurons = np.append(neurons, np.zeros(diff, dtype=neurons.dtype))
+
+        img = array_to_img(neurons.reshape((1, cols, cols)))
+        img = img.resize((cols * 8, cols * 8))
+
+        return img
+
+    def get_histogram(x, tensor):
+        h = np.histogram(tensor.detach().numpy(), bins=20)
+        # <version><x><bins><...x><...y>, little endian
+        # uint8|Uint32|Uint16|...Float32|...Uint32
+        # B|L|H|...f|...L
+        return pack('<BIH', 1, int(x), h[0].size) + h[1].astype('<f').tobytes() + h[0].astype('<I').tobytes()
+
+    callback = {
+        'map': dict(),
+        'input_names': [],
+        'output_names': dict(),
+        'called': False
+    }
+
+    def send_debug(node_id, module, output):
+        if node_id in callback['map']:
+            node_id = callback['map'][node_id]
+        node_id = graph_name + ':' + node_id
+
+        if not context.debugger_controller.state or node_id not in context.debugger_controller.state.watchingLayers:
+            return
+
+        x = 1
+        image = None
+        activations = None
+        if isinstance(output, tuple) and len(output) > 0:
+            output = output[0]
+
+        if hasattr(output, 'shape'):
+            activations = get_histogram(x, output)
+
+            if len(output.shape) > 0:
+                # outputs come in batch usually, so pick first
+                sample = output[0].detach().numpy()
+                if len(sample.shape) == 3:
+                    if sample.shape[0] == 3:
+                        image = PIL.Image.fromarray(get_layer_vis_square(sample))
+                    else:
+                        image = PIL.Image.fromarray(get_image_tales(sample))
+                elif len(sample.shape) > 1:
+                    image = PIL.Image.fromarray(get_layer_vis_square(sample))
+                else:
+                    image = make_image_from_dense(sample)
+        elif isinstance(output[0], (float, str, int)):
+            image = output
+
+        whistogram = None
+        bhistogram = None
+
+        if hasattr(module, 'weight') and module.weight is not None:
+            whistogram = get_histogram(x, module.weight)
+
+        if hasattr(module, 'bias') and module.bias is not None:
+            bhistogram = get_histogram(x, module.bias)
+
+        # map from graph extraction
+
+        output_rep = None
+        if isinstance(image, PIL.Image.Image):
+            output_rep = base64.b64encode(pil_image_to_jpeg(image)).decode()
+        elif isinstance(output, (float, int)):
+            output_rep = output
+
+        context.client.job_action_threadsafe('addLiveLayerData', [
+            node_id,
+            output_rep,
+            base64.b64encode(activations).decode() if activations else None,
+            base64.b64encode(whistogram).decode() if whistogram else None,
+            base64.b64encode(bhistogram).decode() if bhistogram else None,
+        ])
+
+    def register_hook(module):
+        def hook(module, input, output):
+            module_id = known_modules_map[module]
+            node_id = module_id
+            if '.' not in module_id:
+                # we are in the root module
+
+                if module is net and not callback['called']:
+                    # important to set True here otherwise we get endless loop
+                    callback['called'] = True
+                    map, input_names, output_names = resolve_map(input)
+                    callback['map'] = map
+                    callback['input_names'] = input_names
+                    callback['output_names'] = output_names
+
+                if len(callback['input_names']) > 1:
+                    for i, name in enumerate(callback['input_names']):
+                        send_debug(name, module, input[i])
+                elif len(callback['input_names']) == 1:
+                    send_debug(callback['input_names'][0], module, input)
+
+                if len(callback['output_names']) > 1:
+                    for i, name in enumerate(callback['output_names']):
+                        send_debug(name, module, output[i])
+                elif len(callback['output_names']) == 1:
+                    send_debug(callback['output_names'][0], module, output)
+
+            else:
+                send_debug(node_id, module, output)
+
+        module.register_forward_hook(hook)
+
+    net.apply(register_hook)

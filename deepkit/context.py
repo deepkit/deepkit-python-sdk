@@ -8,10 +8,11 @@ import time
 from threading import Lock
 from typing import Optional, Callable, NamedTuple, Dict
 
+import numpy as np
 import psutil
 import typedload
 from rx import interval
-from rx.subject import Subject
+from torch import from_numpy
 
 import deepkit.client
 import deepkit.globals
@@ -60,7 +61,7 @@ class JobDebuggingState(NamedTuple):
 
 class JobDebuggerController:
     def __init__(self, client: deepkit.client.Client):
-        self.state: JobDebuggingState
+        self.state: Optional[JobDebuggingState] = None
         self.client = client
 
     async def connected(self):
@@ -96,12 +97,11 @@ class Context:
         self.job_iterations = 0
         self.seconds_per_iteration = 0
         self.seconds_per_iterations = []
-        self.debugger_controller = None
 
         if deepkit.utils.in_self_execution():
             self.job_controller = JobController()
 
-        self.debugger_controller = JobDebuggerController(self.client)
+        self.debugger_controller: JobDebuggerController = JobDebuggerController(self.client)
 
         # runs in the client Thread
         def on_connect(connected):
@@ -313,7 +313,6 @@ class Context:
         self.defined_metrics[name] = {}
         self.client.job_action_threadsafe('defineMetric', [name, options])
 
-
     # def debug_snapshot(self, graph: dict):
     #     self.client.job_action_threadsafe('debugSnapshot', [graph])
 
@@ -326,6 +325,59 @@ class Context:
 
     def set_model_graph(self, graph: dict):
         self.client.job_action_threadsafe('setModelGraph', [graph])
+
+    def watch_torch_model(self, model, name='main'):
+        from deepkit.pytorch import watch_torch_model
+
+        def resolve_map(inputs):
+            graph, record_map, input_names, output_names = self.set_torch_model(model, name=name, inputs=inputs)
+            return record_map, input_names, output_names
+
+        watch_torch_model(self, model, name, resolve_map)
+
+    def set_torch_model(self, model, input_shape=None, input_sample=None, inputs=None, name='main'):
+        """
+        Extracts the computation graph using either the given input_shape with random data
+        or the given (real) input_sample. If you have multiple models per training, use the name
+        argument to differentiate.
+        :param model: your pytorch model instance
+        :param input_shape: shape like (1, 32, 32) or a list of input shapes for multi input ((1, 3, 64, 64), (10,)).
+                            Don't forget to specify the batch dimension.
+        :param input_sample: a simple (not in a batch)
+        :param inputs: full inputs list with real examples as if `model(*inputs)` is  called
+        :param name: optional name if you have multiple models
+        :return:
+        """
+        if not inputs and not input_shape and input_sample is None:
+            raise Exception('No inputs, input_shape and no input_sample given. Specify either of those.')
+        from deepkit.pytorch import get_pytorch_graph
+        xs = inputs
+
+        if xs is None:
+            if input_sample is not None:
+                if isinstance(input_sample, (tuple, list)):
+                    xs = input_sample
+                else:
+                    # we got single input sample
+                    xs = [input_sample]
+
+            if xs is None:
+                # we need a batch size of 1
+                if isinstance(input_shape[0], (tuple, list)):
+                    # we got multi inputs
+                    xs = []
+                    for i in range(0, len(input_shape)):
+                        # convert to float32 per default
+                        x = (from_numpy(np.random.random_sample(input_shape[i]).astype(np.single)),)
+                        xs.append(x)
+                else:
+                    # convert to float32 per default
+                    xs = (from_numpy(np.random.random_sample(input_shape).astype(np.single)),)
+
+        graph, record_map, input_names, output_names = get_pytorch_graph(model, xs)
+
+        self.client.job_action_threadsafe('setModelGraph', [graph, name])
+        return graph, record_map, input_names, output_names
 
     def metric(self, name: str, x, y):
         if name not in self.defined_metrics:

@@ -14,14 +14,12 @@ setup(name='deepkit',
       packages=find_packages(),
       install_requires=[
           'numpy',
-          'cherrypy>=7.1.0',
-          'six>=1.11.0',
           'Pillow>=4.0.0',
           'rx>=1.5',
-          'image',
+          'torch',
+          'torchvision',
           'typedload>=1.20',
           'PyYAML>=5.0.0',
           'psutil>=5.4.6',
-          'websockets>=8.1',
-          'simplejson>=3.13.2'
+          'websockets>=8.1'
       ])
