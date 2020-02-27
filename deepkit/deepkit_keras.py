@@ -90,7 +90,7 @@ class KerasCallback(keras.callbacks.Callback):
         """
         if not self.context.debugger_controller.state: return
         state = self.context.debugger_controller.state
-        record_needed = self.context.debugger_controller.state.recording
+        record_needed = state.recording
 
         if state.recordingMode == 'second':
             diff = time.time() - self.last_snapshot_last_time
@@ -104,7 +104,7 @@ class KerasCallback(keras.callbacks.Callback):
                 # nothing to do for records
                 record_needed = False
 
-        live_needed = self.context.debugger_controller.state.live and (time.time() - self.last_live_debug_sent) > 1
+        live_needed = state.live and (time.time() - self.last_live_debug_sent) > 1
 
         layers = list(state.watchingLayers.keys())
 
@@ -297,8 +297,8 @@ class KerasCallback(keras.callbacks.Callback):
         self.start_time = time.time()
         self.last_batch_time = time.time()
 
-        deepkit.epoch(0, self.params['epochs'])
-        deepkit.set_info('parameters', get_total_params(self.model))
+        self.context.epoch(0, self.params['epochs'])
+        self.context.set_info('parameters', get_total_params(self.model))
 
         # self.job_backend.upload_keras_graph(self.model)
 
@@ -306,7 +306,7 @@ class KerasCallback(keras.callbacks.Callback):
             config = self.model.optimizer.get_config()
             # deepkit.set_info('optimizer', type(self.model.optimizer).__name__)
             for i, v in config.items():
-                deepkit.set_info('optimizer.' + str(i), v)
+                self.context.set_info('optimizer.' + str(i), v)
 
         # compatibility with keras 1.x
         if 'epochs' not in self.params and 'nb_epoch' in self.params:
@@ -321,18 +321,18 @@ class KerasCallback(keras.callbacks.Callback):
                 traces.append('train_' + output.name)
                 traces.append('val_' + output.name)
 
-        self.accuracy_metric = deepkit.create_metric('accuracy', traces=traces)
-        self.loss_metric = deepkit.create_loss_metric('loss')
-        self.learning_rate_metric = deepkit.create_metric('learning rate', traces=['start', 'end'])
+        self.accuracy_metric = self.context.define_metric('accuracy', traces=traces)
+        self.loss_metric = self.context.define_metric('loss')
+        self.learning_rate_metric = self.context.define_metric('learning rate', traces=['start', 'end'])
 
-        deepkit.epoch(0, self.params['epochs'])
+        self.context.epoch(0, self.params['epochs'])
         if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
             loss_traces = []
             for output in self.model.output_layers:
                 loss_traces.append('train_' + output.name)
                 loss_traces.append('val_' + output.name)
 
-            self.all_losses = deepkit.create_metric('loss_all', traces=loss_traces)
+            self.all_losses = self.context.define_metric('loss_all', traces=loss_traces)
 
         # if self.force_insights or self.job_model.insights_enabled:
         #     images = self.build_insight_images()

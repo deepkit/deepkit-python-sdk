@@ -32,6 +32,7 @@ class Client(threading.Thread):
         self.options: ContextOptions = options
 
         self.host = os.environ.get('DEEPKIT_HOST', '127.0.0.1')
+        self.ssl = os.environ.get('DEEPKIT_SSL', '0') is '1'
         self.port = int(os.environ.get('DEEPKIT_PORT', '8960'))
         self.token = os.environ.get('DEEPKIT_JOB_ACCESSTOKEN', None)
         self.job_id = os.environ.get('DEEPKIT_JOB_ID', None)
@@ -351,9 +352,10 @@ class Client(threading.Thread):
             self.connected.on_next(False)
             self.loop.create_task(self._connect())
 
-    async def _connect_job(self, host: str, port: int, id: str, token: str):
+    async def _connect_job(self, id: str, token: str):
         try:
-            self.connection = await websockets.connect(f"ws://{host}:{port}")
+            ws = 'wss' if self.ssl else 'ws'
+            self.connection = await websockets.connect(f"{ws}://{self.host}:{self.port}")
         except Exception:
             # try again later
             await asyncio.sleep(1)
@@ -399,8 +401,10 @@ class Client(threading.Thread):
         self.queue = []
 
         if self.token:
-            await self._connect_job(self.host, self.port, self.job_id, self.token)
-        else:
+            await self._connect_job(self.job_id, self.token)
+            return
+
+        try:
             config = get_home_config()
             link: Optional[FolderLink] = None
             if self.options.account:
@@ -414,6 +418,7 @@ class Client(threading.Thread):
 
             self.host = account_config.host
             self.port = account_config.port
+            self.ssl = account_config.ssl
             ws = 'wss' if account_config.ssl else 'ws'
 
             try:
@@ -453,12 +458,14 @@ class Client(threading.Thread):
             job = await self._action('app', 'createJob', [projectId],
                                      lock=False)
 
-            deepkit.globals.loaded_job = job
+            deepkit.globals.loaded_job_config = job
             self.token = await self._action('app', 'getJobAccessToken', [job['id']], lock=False)
             self.job_id = job['id']
 
             # todo, implement re-authentication, so we don't have to drop the active connection
             await self.connection.close()
-            await self._connect_job(self.host, self.port, self.job_id, self.token)
+            await self._connect_job(self.job_id, self.token)
+        except Exception as e:
+            self.connecting.set_exception(e)
 
         self.queue = queue_copy + self.queue

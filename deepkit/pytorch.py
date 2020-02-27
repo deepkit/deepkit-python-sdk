@@ -1,13 +1,13 @@
-import base64
-import io
 import math
 import re
 from struct import pack
+from typing import Dict, Optional
 
-import PIL
+import PIL.Image
 import numpy as np
 
 import deepkit.context
+import deepkit.debugger
 from deepkit.pytorch_graph import build_graph
 from deepkit.utils import array_to_img
 from deepkit.utils.image import get_layer_vis_square, get_image_tales
@@ -150,7 +150,7 @@ def get_pytorch_graph(net, inputs):
         layer_id = names_from_debug[node.debugName]
         short_layer_id = scopes_from_debug[node.debugName]
 
-        print(node.debugName, '=>', layer_id, short_layer_id, node.kind, node.tensor_size)
+        # print(node.debugName, '=>', layer_id, short_layer_id, node.kind, node.tensor_size)
         for parent in get_parent_names(layer_id):
             container_names[parent] = True
 
@@ -160,8 +160,8 @@ def get_pytorch_graph(net, inputs):
 
             if input in names_from_debug and layer_id != names_from_debug[input] \
                     and short_layer_id != names_from_debug[input]:
-                print('   outgoing', names_from_debug[input], scopes_from_debug[input], input,
-                      nodes_from_id[names_from_debug[input]].kind)
+                # print('   outgoing', names_from_debug[input], scopes_from_debug[input], input,
+                #       nodes_from_id[names_from_debug[input]].kind)
                 # this node points out of itself, so create an edge
                 edge_to = names_from_debug[input]
 
@@ -235,7 +235,7 @@ def get_pytorch_graph(net, inputs):
             found_outputs = set()
             find_outputs(name, found_outputs)
             i = 0
-            print('found new outputs', name, found_outputs)
+            # print('found new outputs', name, found_outputs)
 
             for output in found_outputs:
                 i += 1
@@ -315,13 +315,17 @@ def get_pytorch_graph(net, inputs):
                     node_type = 'op'
                     node_sub_type = torch_node.kind.replace('aten::', '').strip('_')
 
+                if str(torch_node.kind).startswith('prim::'):
+                    node_type = 'primitive'
+                    node_sub_type = torch_node.kind.replace('prim::', '').strip('_')
+
             if node_sub_type.lower() in activation_functions:
                 node_type = 'activation'
                 node_sub_type = node_sub_type
 
-        attributes['torch.debugName'] = torch_node.debugName
-        attributes['torch.kind'] = torch_node.kind
-        attributes['torch.inputs'] = ', '.join(torch_node.inputs)
+        # attributes['torch.debugName'] = torch_node.debugName
+        # attributes['torch.kind'] = torch_node.kind
+        # attributes['torch.inputs'] = ', '.join(torch_node.inputs)
 
         # source = str(torch_node.node.debugName).split(' # ')[1].strip() \
         #     if hasattr(torch_node.node, 'debugName') and ' # ' in str(torch_node.node.debugName) else None
@@ -369,21 +373,87 @@ def get_pytorch_graph(net, inputs):
     return graph, record_map, input_names, output_names
 
 
-def watch_torch_model(context: deepkit.Context, net, graph_name: str, resolve_map):
-    known_modules_map = dict()
-    known_modules_name_map = dict()
+class TorchDebugger:
+    def __init__(self, debugger: deepkit.debugger.DebuggerManager, net, graph_name: str, resolve_map):
+        self.known_modules_map = dict()
+        self.known_modules_name_map = dict()
+        self.debugger = debugger
 
-    for name, module in net.named_modules(prefix=type(net).__name__):
-        known_modules_map[module] = name
-        known_modules_name_map[name] = module
+        for name, module in net.named_modules(prefix=type(net).__name__):
+            self.known_modules_map[module] = name
+            self.known_modules_name_map[name] = module
 
-    def pil_image_to_jpeg(image):
-        buffer = io.BytesIO()
+        self.net = net
+        self.graph_name = graph_name
+        self.resolve_map = resolve_map
 
-        image.save(buffer, format="JPEG", optimize=True, quality=70)
-        return buffer.getvalue()
+        # contains a map of recording map, names from nodes of the full graph to actual modules
+        # this is necessary since we map certain internal nodes to a scope/layer/module.
+        self.record_map = dict()
+        self.model_input_names = []
+        self.model_output_names = []
+        self.model_input = None
+        self.extract_graph = False
 
-    def make_image_from_dense(neurons):
+        self.fetch_result: Dict[str, deepkit.debugger.DebuggerFetchItem] = dict()
+        self.fetch_config: Optional[deepkit.debugger.DebuggerFetchConfig] = None
+
+        def root_hook(module, input):
+            if self.extract_graph: return
+            if self.debugger.active_debug_data_for_this_run: return
+
+            if self.model_input is None:
+                self.model_input = input
+                self.extract_graph = True
+                self.record_map, self.model_input_names, self.model_output_names = self.resolve_map(input)
+                self.extract_graph = False
+            else:
+                self.debugger.tick()
+
+        net.register_forward_pre_hook(root_hook)
+
+        self.net.apply(self.register_hook)
+
+    def fetch(self, fetch_config: deepkit.debugger.DebuggerFetchConfig) -> Dict[str, deepkit.debugger.DebuggerFetchItem]:
+        self.fetch_config = fetch_config
+        self.fetch_result = dict()
+
+        if not self.model_input:
+            return self.fetch_result
+
+        if len(self.model_input_names) > 1:
+            for i, name in enumerate(self.model_input_names):
+                self.send_debug(name, self.net, self.model_input[i])
+        elif len(self.model_input_names) == 1:
+            self.send_debug(self.model_input_names[0], self.net, self.model_input)
+
+        self.net(*self.model_input)
+
+        return self.fetch_result
+
+    def register_hook(self, module):
+        def hook(module, input, output):
+            if self.extract_graph: return
+            if not self.debugger.active_debug_data_for_this_run:
+                # we don't care about hook calls outside of our debug tracking
+                return
+
+            module_id = self.known_modules_map[module]
+            node_id = module_id
+            if '.' not in module_id:
+                # we are in the root module, so we use that for global output tracking
+                if len(self.model_output_names) > 1:
+                    for i, name in enumerate(self.model_output_names):
+                        self.send_debug(name, module, output[i])
+                elif len(self.model_output_names) == 1:
+                    self.send_debug(self.model_output_names[0], module, output)
+            else:
+                # sub node
+                self.send_debug(node_id, module, output)
+
+        module.register_forward_hook(hook)
+
+    def make_image_from_dense(self, neurons):
         cols = int(math.ceil(math.sqrt(len(neurons))))
 
         even_length = cols * cols
@@ -396,36 +466,21 @@ def watch_torch_model(context: deepkit.Context, net, graph_name: str, resolve_ma
 
         return img
 
-    def get_histogram(x, tensor):
+    def get_histogram(self, x, tensor):
         h = np.histogram(tensor.detach().numpy(), bins=20)
         # <version><x><bins><...x><...y>, little endian
         # uint8|Uint32|Uint16|...Float32|...Uint32
         # B|L|H|...f|...L
         return pack('<BIH', 1, int(x), h[0].size) + h[1].astype('<f').tobytes() + h[0].astype('<I').tobytes()
 
-    callback = {
-        'map': dict(),
-        'input_names': [],
-        'output_names': dict(),
-        'called': False
-    }
-
-    def send_debug(node_id, module, output):
-        if node_id in callback['map']:
-            node_id = callback['map'][node_id]
-        node_id = graph_name + ':' + node_id
-
-        if not context.debugger_controller.state or node_id not in context.debugger_controller.state.watchingLayers:
-            return
-
-        x = 1
+    def get_debug_data(self, x, module, output):
         image = None
         activations = None
         if isinstance(output, tuple) and len(output) > 0:
             output = output[0]
 
         if hasattr(output, 'shape'):
-            activations = get_histogram(x, output)
+            activations = self.get_histogram(x, output)
 
             if len(output.shape) > 0:
                 # outputs come in batch usually, so pick first
@@ -438,65 +493,41 @@ def watch_torch_model(context: deepkit.Context, net, graph_name: str, resolve_ma
                 elif len(sample.shape) > 1:
                     image = PIL.Image.fromarray(get_layer_vis_square(sample))
                 else:
-                    image = make_image_from_dense(sample)
-        elif isinstance(output[0], (float, str, int)):
-            image = output
+                    image = self.make_image_from_dense(sample)
+        # elif isinstance(output[0], (float, str, int)):
+        #     image = output
 
         whistogram = None
         bhistogram = None
 
         if hasattr(module, 'weight') and module.weight is not None:
-            whistogram = get_histogram(x, module.weight)
+            whistogram = self.get_histogram(x, module.weight)
 
         if hasattr(module, 'bias') and module.bias is not None:
-            bhistogram = get_histogram(x, module.bias)
-
-        # map from graph extraction
+            bhistogram = self.get_histogram(x, module.bias)
 
         output_rep = None
         if isinstance(image, PIL.Image.Image):
-            output_rep = base64.b64encode(pil_image_to_jpeg(image)).decode()
+            output_rep = image
         elif isinstance(output, (float, int)):
             output_rep = output
 
-        context.client.job_action_threadsafe('addLiveLayerData', [
-            node_id,
-            output_rep,
-            base64.b64encode(activations).decode() if activations else None,
-            base64.b64encode(whistogram).decode() if whistogram else None,
-            base64.b64encode(bhistogram).decode() if bhistogram else None,
-        ])
+        return output_rep, activations, whistogram, bhistogram
 
-    def register_hook(module):
-        def hook(module, input, output):
-            module_id = known_modules_map[module]
-            node_id = module_id
-            if '.' not in module_id:
-                # we are in the root module
+    def send_debug(self, node_id, module, output):
+        if node_id in self.record_map:
+            node_id = self.record_map[node_id]
+        node_id = self.graph_name + ':' + node_id
 
-                if module is net and not callback['called']:
-                    # important to set True here otherwise we get endless loop
-                    callback['called'] = True
-                    map, input_names, output_names = resolve_map(input)
-                    callback['map'] = map
-                    callback['input_names'] = input_names
-                    callback['output_names'] = output_names
+        if self.fetch_config.needs_fetch(node_id):
+            output_rep, ahistogram, whistogram, bhistogram = self.get_debug_data(
+                self.fetch_config.x, module, output
+            )
 
-                if len(callback['input_names']) > 1:
-                    for i, name in enumerate(callback['input_names']):
-                        send_debug(name, module, input[i])
-                elif len(callback['input_names']) == 1:
-                    send_debug(callback['input_names'][0], module, input)
-
-                if len(callback['output_names']) > 1:
-                    for i, name in enumerate(callback['output_names']):
-                        send_debug(name, module, output[i])
-                elif len(callback['output_names']) == 1:
-                    send_debug(callback['output_names'][0], module, output)
-
-            else:
-                send_debug(node_id, module, output)
-
-        module.register_forward_hook(hook)
-
-    net.apply(register_hook)
+            self.fetch_result[node_id] = deepkit.debugger.DebuggerFetchItem(
+                name=node_id,
+                output=output_rep,
+                ahistogram=ahistogram,
+                whistogram=whistogram,
+                bhistogram=bhistogram,
+            )

@@ -1,12 +1,13 @@
 import asyncio
 import atexit
 import base64
+import json
 import os
 import signal
 import struct
 import time
 from threading import Lock
-from typing import Optional, Callable, NamedTuple, Dict
+from typing import Optional, Callable, NamedTuple, Dict, List
 
 import numpy as np
 import psutil
@@ -14,16 +15,23 @@ import typedload
 from rx import interval
 from torch import from_numpy
 
+import deepkit.debugger
 import deepkit.client
 import deepkit.globals
 import deepkit.utils
 from deepkit.model import ContextOptions
 
 
-def pytorch_graph():
-    # see https://discuss.pytorch.org/t/print-autograd-graph/692/18
-    # https://github.com/szagoruyko/pytorchviz
-    pass
+def get_job_config():
+    if deepkit.globals.loaded_job_config is None:
+        if 'DEEPKIT_TASK_CONFIG' in os.environ:
+            print('DEEPKIT_JOB_CONFIG', os.environ['DEEPKIT_JOB_CONFIG'])
+            deepkit.globals.loaded_job_config = json.loads(os.environ['DEEPKIT_TASK_CONFIG'])
+        else:
+            deepkit.globals.loaded_job_config = {
+            }
+
+    return deepkit.globals.loaded_job_config
 
 
 class JobController:
@@ -95,8 +103,14 @@ class Context:
         self.last_batch_time = 0
         self.job_iteration = 0
         self.job_iterations = 0
+        self.job_step = 0
+        self.job_steps = 0
+
+        self.auto_x_of_metrix = dict()
+
         self.seconds_per_iteration = 0
         self.seconds_per_iterations = []
+        self.debugger = deepkit.debugger.DebuggerManager(self)
 
         if deepkit.utils.in_self_execution():
             self.job_controller = JobController()
@@ -119,13 +133,13 @@ class Context:
         self.client.connect()
         self.wait_for_connect()
 
-        if deepkit.utils.in_self_execution:
-            # the CLI handles output logging
+        if deepkit.utils.in_self_execution():
+            # the CLI handles output logging otherwise
             if len(deepkit.globals.last_logs.getvalue()) > 0:
                 self.logs_buffer.append(deepkit.globals.last_logs.getvalue())
 
-        if deepkit.utils.in_self_execution:
-            # the CLI handles hardware monitoring
+        if deepkit.utils.in_self_execution():
+            # the CLI handles hardware monitoring otherwise
             p = psutil.Process()
 
             def on_hardware_metrics(dummy):
@@ -136,16 +150,17 @@ class Context:
                     1,
                     0,
                     time.time(),
-                    int(((p.cpu_percent(interval=None) / 100) / psutil.cpu_count()) * 65535),
                     # stretch to max precision of uint16
-                    int((p.memory_percent() / 100) * 65535),  # stretch to max precision of uint16
+                    int(((p.cpu_percent(interval=None) / 100) / psutil.cpu_count(False)) * 65535),
+                    # stretch to max precision of uint16
+                    int((p.memory_percent() / 100) * 65535),
                     float(net.bytes_recv),
                     float(net.bytes_sent),
                     float(disk.write_bytes),
                     float(disk.read_bytes),
                 )
 
-                self.client.job_action_threadsafe('streamFile',
+                self.client.job_action_threadsafe('streamInternalFile',
                                                   ['.deepkit/hardware/main_0.hardware',
                                                    base64.b64encode(data).decode('utf8')])
 
@@ -163,7 +178,7 @@ class Context:
         item = self.speed_buffer[-1]
         self.speed_buffer = []
         self.client.job_action_threadsafe(
-            'streamFile',
+            'streamInternalFile',
             ['.deepkit/speed.metric', base64.b64encode(item).decode('utf8')]
         )
 
@@ -182,7 +197,6 @@ class Context:
             return
         buffer = self.metric_buffer.copy()
         self.metric_buffer = []
-
         try:
             packed = {}
             items = {}
@@ -196,6 +210,7 @@ class Context:
 
             for i, v in packed.items():
                 # print('channelData', items[i], len(v) / 27)
+
                 self.client.job_action_threadsafe('channelData', [i, base64.b64encode(v).decode('utf8')])
         except Exception as e:
             print('on_metric failed', e)
@@ -216,6 +231,7 @@ class Context:
 
     def epoch(self, current: int, total: Optional[int]):
         self.iteration(current, total)
+        self.debugger.tick()
 
     def iteration(self, current: int, total: Optional[int]):
         self.job_iteration = current
@@ -253,7 +269,14 @@ class Context:
         else:
             self.client.patch('eta', 0)
 
+    def batch(self, current: int, total: int = None, size: int = None):
+        self.step(current, total, size)
+
     def step(self, current: int, total: int = None, size: int = None):
+        self.job_step = current
+        if total is not None:
+            self.job_steps = total
+
         self.client.patch('step', current)
         now = time.time()
 
@@ -291,6 +314,8 @@ class Context:
         if total:
             self.client.patch('steps', total)
 
+        self.debugger.tick()
+
     def set_title(self, s: str):
         self.client.patch('title', s)
 
@@ -306,15 +331,21 @@ class Context:
     def remove_label(self, label_name: str):
         self.client.job_action_threadsafe('removeLabel', [label_name])
 
-    def set_parameter(self, name: str, value: any):
-        self.client.patch('config.parameters.' + name, value)
+    def set_config(self, name: str, value: any):
+        self.client.patch('config.config.' + name, value)
 
-    def define_metric(self, name: str, options: dict):
-        self.defined_metrics[name] = {}
-        self.client.job_action_threadsafe('defineMetric', [name, options])
+    def define_metric(self, name: str, traces: List[str]):
+        name = name.replace('.', '/')
+        self.defined_metrics[name] = {'traces': traces}
+        self.client.job_action_threadsafe('defineMetric', [name, self.defined_metrics[name]])
 
-    # def debug_snapshot(self, graph: dict):
-    #     self.client.job_action_threadsafe('debugSnapshot', [graph])
+        context = self
+
+        class Controller:
+            def send(self, x=None, y=None):
+                context.metric(name, x=x, y=y)
+
+        return Controller
 
     def add_file(self, path: str):
         self.client.job_action_threadsafe('uploadFile',
@@ -326,14 +357,41 @@ class Context:
     def set_model_graph(self, graph: dict):
         self.client.job_action_threadsafe('setModelGraph', [graph])
 
+    def set_list(self, name: str):
+        self.client.job_action_threadsafe('setList', [name])
+
+    def get_config(self, path, default=None):
+        res = deepkit.utils.get_parameter_by_path(get_job_config(), path)
+        if res is None:
+            self.set_config(path, default)
+            return default
+
+        return res
+
+    def intconfig(self, path, default=None):
+        v = self.get_config(path, None)
+        return int(v) if v is not None else default
+
+    def floatconfig(self, path, default=None):
+        v = self.get_config(path, None)
+        return float(v) if v is not None else default
+
+    def boolconfig(self, path, default=None):
+        v = self.get_config(path, None)
+        return bool(v) if v is not None else default
+
+    def config(self, path, default=None):
+        v = self.get_config(path, None)
+        return v if v is not None else default
+
     def watch_torch_model(self, model, name='main'):
-        from deepkit.pytorch import watch_torch_model
+        from deepkit.pytorch import TorchDebugger
 
         def resolve_map(inputs):
             graph, record_map, input_names, output_names = self.set_torch_model(model, name=name, inputs=inputs)
             return record_map, input_names, output_names
 
-        watch_torch_model(self, model, name, resolve_map)
+        self.debugger.register_debugger(TorchDebugger(self.debugger, model, name, resolve_map))
 
     def set_torch_model(self, model, input_shape=None, input_sample=None, inputs=None, name='main'):
         """
@@ -379,12 +437,31 @@ class Context:
         self.client.job_action_threadsafe('setModelGraph', [graph, name])
         return graph, record_map, input_names, output_names
 
-    def metric(self, name: str, x, y):
-        if name not in self.defined_metrics:
-            self.define_metric(name, {})
+    def metric(self, name: str, x=None, y=None):
+        if y is None:
+            y = 0
 
         if not isinstance(y, list):
             y = [y]
+
+        if x is None:
+            if self.job_steps > 0:
+                x = self.job_iteration + (self.job_step / self.job_steps)
+            else:
+                if name not in self.auto_x_of_metrix:
+                    self.auto_x_of_metrix[name] = 0
+                self.auto_x_of_metrix[name] += 1
+                x = self.auto_x_of_metrix[name]
+
+        name = name.replace('.', '/')
+
+        if name not in self.defined_metrics:
+            traces = [str(i) for i, _ in enumerate(y)]
+            self.define_metric(name, traces=traces)
+        else:
+            if 'traces' in self.defined_metrics[name] and len(self.defined_metrics[name]['traces']) != len(y):
+                traces = self.defined_metrics[name]['traces']
+                raise Exception(f'Metric {name} has {len(traces)} traces defined, but you provided {len(y)}')
 
         row_binary = struct.pack('<BHdd', 1, len(y), float(x), time.time())
         for y1 in y:
@@ -394,6 +471,12 @@ class Context:
         self.metric_buffer.append({'id': name, 'row': row_binary})
         self.throttle_call(self.drain_metric_buffer)
 
+    def create_keras_callback(self, debug_x=None):
+        from .deepkit_keras import KerasCallback
+        callback = KerasCallback(debug_x)
+
+        return callback
+
     def log(self, s: str):
         self.logs_buffer.append(s)
-        self.throttle_call(self.drain_logs);
+        self.throttle_call(self.drain_logs)

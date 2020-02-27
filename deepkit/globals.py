@@ -5,6 +5,6 @@ import deepkit.context
 
 last_context: Optional[deepkit.context.Context] = None
 
-loaded_job = None
+loaded_job_config = None
 
 last_logs = io.StringIO('')

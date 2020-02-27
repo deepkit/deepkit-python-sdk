@@ -304,7 +304,7 @@ def get_layer_vis_square(data,
     elif data.ndim == 3:
         if data.shape[0] == 3:
             # interpret as a color image
-            # (1, H, W,3)
+            # (1, H, W, 3)
             if channel_order == 'BGR':
                 data = data[[2, 1, 0], ...]  # BGR to RGB (see issue #59)
             data = data.transpose(1, 2, 0)
