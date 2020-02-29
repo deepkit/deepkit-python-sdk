@@ -9,6 +9,7 @@ import math
 from six.moves import range
 
 # Find the best implementation available
+from deepkit.utils import array_to_img
 from deepkit.utils.pilutil import imresize
 
 try:
@@ -37,6 +38,20 @@ import PIL.Image
 # List of supported file extensions
 # Use like "if filename.endswith(SUPPORTED_EXTENSIONS)"
 SUPPORTED_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.ppm')
+
+
+def make_image_from_dense(neurons):
+    cols = int(math.ceil(math.sqrt(len(neurons))))
+
+    even_length = cols * cols
+    diff = even_length - len(neurons)
+    if diff > 0:
+        neurons = np.append(neurons, np.zeros(diff, dtype=neurons.dtype))
+
+    img = array_to_img(neurons.reshape((1, cols, cols)))
+    img = img.resize((cols * 8, cols * 8))
+
+    return img
 
 
 def upscale(image, ratio):

@@ -265,14 +265,18 @@ class Client(threading.Thread):
         self.subscriber[self.message_id] = on_incoming_message
         self.queue.append(message)
 
-    async def _message(self, message, lock=True, no_response=False):
-        if lock: await self.connecting
-
+    def _create_message(self, message: dict, lock=True, no_response=False) -> dict:
         self.message_id += 1
         message['id'] = self.message_id
         if not no_response:
             self.callbacks[self.message_id] = self.loop.create_future()
 
+        return message
+
+    async def _message(self, message, lock=True, no_response=False):
+        if lock: await self.connecting
+
+        message = self._create_message(message, no_response=no_response)
         self.queue.append(message)
 
         if no_response:
@@ -363,17 +367,10 @@ class Client(threading.Thread):
             return
 
         self.loop.create_task(self.handle_messages(self.connection))
+        # we don't use send_messages() since this would send all queue/patches
+        # which would lead to permission issues when we're not first authenticated
 
-        # on reconnect this sends all patches and queued messages as well before authentication
-        # is done, so we temp save those, do the authentication, and then let the client
-        # sync the queued stuff again
-        old_queue = self.queue.copy()
-        old_patches = self.patches.copy()
-        self.queue = []
-        self.patches = {}
-        self.loop.create_task(self.send_messages(self.connection))
-
-        res = await self._message({
+        message = self._create_message({
             'name': 'authenticate',
             'token': {
                 'id': 'job',
@@ -382,11 +379,13 @@ class Client(threading.Thread):
             }
         }, lock=False)
 
+        await self.connection.send(json.dumps(message))
+
+        res = await self.callbacks[message['id']]
         if not res['result'] or res['result'] is not True:
             raise Exception('Job token invalid')
 
-        self.queue = old_queue
-        self.patches = old_patches
+        self.loop.create_task(self.send_messages(self.connection))
 
         self.connecting.set_result(True)
         if self.connections > 0:

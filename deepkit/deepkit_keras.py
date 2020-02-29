@@ -1,27 +1,19 @@
 # -*- coding: utf-8 -*-
 from __future__ import division
 
-import base64
-import io
 import math
 import os
 import sys
 import time
-from struct import pack
 
-import PIL.Image
 import numpy as np
 
 if 'keras' in sys.modules:
     import keras
-    from keras import Model
 else:
     import tensorflow.keras as keras
-    from tensorflow.keras import Model
 
 import deepkit
-from deepkit.tf import extract_model_graph, layer_visitor
-from deepkit.utils.image import get_image_tales, get_layer_vis_square
 
 
 def is_generator(obj):
@@ -74,224 +66,9 @@ class KerasCallback(keras.callbacks.Callback):
         self.loss_metric = None
         self.learning_rate_metric = None
 
-        self.live_debug_data_x = 0
-        self.snapshot_debug_data_x = 0
-
-        self.learning_rate_start = 0
-        self.last_live_debug_sent = 0
-        self.last_live_futures = []
-        self.last_snapshot_futures = []
-        self.last_snapshot_last_time = 0
-        self.last_snapshot_last_epoch = None
-
-    def check_snapshot(self, epoch_end=False):
-        """
-        Checks if a snapshots needs to be created. Either for records, live view. or both.
-        """
-        if not self.context.debugger_controller.state: return
-        state = self.context.debugger_controller.state
-        record_needed = state.recording
-
-        if state.recordingMode == 'second':
-            diff = time.time() - self.last_snapshot_last_time
-            if diff <= state.recordingSecond:
-                # not enough time past, wait for next call
-                record_needed = False
-
-        if state.recordingMode == 'epoch':
-            if not epoch_end: record_needed = False
-            if self.epoch == self.last_snapshot_last_epoch:
-                # nothing to do for records
-                record_needed = False
-
-        live_needed = state.live and (time.time() - self.last_live_debug_sent) > 1
-
-        layers = list(state.watchingLayers.keys())
-
-        if record_needed and state.recordingLayers == 'all':
-            layers = []
-
-            def visit_layer(layer):
-                layers.append(layer.name)
-
-            layer_visitor(self.model, visit_layer)
-            # we manually create snapshot when layer differ (which is always the case for 'all')
-            # from live's watchingLayers
-            self.create_debug_snapshot(layers, and_as_live=False)
-            if live_needed:
-                self.send_live_debug_data()
-
-            return
-
-        # When a record and a live snapshot is needed, we do both at the same time
-        if live_needed and record_needed:
-            self.create_debug_snapshot(layers, and_as_live=True)
-        elif record_needed:
-            self.create_debug_snapshot(layers, and_as_live=False)
-        elif live_needed:
-            self.send_live_debug_data()
-
-    def create_debug_snapshot(self, layer_names=None, and_as_live=False):
-        if not self.context.debugger_controller: return
-        # we don't send live debug data when not connected
-        if not self.context.client.is_connected(): return
-
-        if not len(layer_names): return
-
-        layers = layer_names.copy()
-
-        # wait for all previous to be sent first.
-        try:
-            for f in self.last_snapshot_futures: f.result()
-        except Exception as e:
-            print('Failing sending debug data', e)
-            pass
-
-        self.snapshot_debug_data_x += 1
-        x = self.snapshot_debug_data_x
-        self.context.client.job_action_threadsafe('addSnapshot', [
-            x,
-            time.time(),
-            layers,
-            self.epoch,
-            self.batch,
-        ])
-
-        self.last_snapshot_last_time = time.time()
-
-        data = self.get_image_and_histogram_from_layers(x, layers)
-
-        for i, layer_name in enumerate(layers):
-            jpeg, activations = data[i]
-            whistogram, bhistogram = self.get_weight_histogram_from_layer(x, layer_name)
-
-            self.last_snapshot_futures.append(self.context.client.job_action_threadsafe('setSnapshotLayerData', [
-                x,
-                layer_name,
-                and_as_live,
-                base64.b64encode(jpeg).decode(),
-                base64.b64encode(activations).decode() if activations else None,
-                base64.b64encode(whistogram).decode() if whistogram else None,
-                base64.b64encode(bhistogram).decode() if bhistogram else None,
-            ]))
-
-    def send_live_debug_data(self):
-        if not self.context.debugger_controller: return
-
-        # we don't send live debug data when not connected
-        if not self.context.client.is_connected(): return
-
-        if not self.context.debugger_controller.state: return
-        if len(self.context.debugger_controller.state.watchingLayers) == 0: return
-        layers = self.context.debugger_controller.state.watchingLayers.copy()
-
-        # wait for all previous to be sent first.
-        try:
-            for f in self.last_live_futures: f.result()
-        except Exception as e:
-            print('Failing sending debug data', e)
-            pass
-
-        self.live_debug_data_x += 1
-        self.last_live_futures = []
-
-        names = list(layers.keys())
-        data = self.get_image_and_histogram_from_layers(self.live_debug_data_x, list(layers.keys()))
-        for i, layer_name in enumerate(names):
-            jpeg, activations = data[i]
-            whistogram, bhistogram = self.get_weight_histogram_from_layer(self.live_debug_data_x, layer_name)
-
-            self.last_live_futures.append(self.context.client.job_action_threadsafe('addLiveLayerData', [
-                layer_name,
-                base64.b64encode(jpeg).decode(),
-                base64.b64encode(activations).decode() if activations else None,
-                base64.b64encode(whistogram).decode() if whistogram else None,
-                base64.b64encode(bhistogram).decode() if bhistogram else None,
-            ]))
-
-        self.last_live_debug_sent = time.time()
-
     def set_model(self, model):
         super().set_model(model)
-        self.context.set_model_graph(extract_model_graph(self.model))
-
-    def get_weight_histogram_from_layer(self, x, layer_name: str):
-        layer_weights = self.model.get_layer(layer_name).get_weights()
-        weights = None
-
-        if len(layer_weights) > 0:
-            h = np.histogram(layer_weights[0], bins=20)
-            # <version><x><bins><...x><...y>, little endian
-            # uint8|Uint32|Uint16|...Float32|...Uint32
-            # B|L|H|...f|...L
-            weights = pack('<BIH', 1, int(x), h[0].size) + h[1].astype('<f').tobytes() + h[0].astype('<I').tobytes()
-
-        biases = None
-        if len(layer_weights) > 1:
-            h = np.histogram(layer_weights[1], bins=20)
-            biases = pack('<BIH', 1, int(x), h[0].size) + h[1].astype('<f').tobytes() + h[0].astype('<I').tobytes()
-
-        return weights, biases
-
-    def get_image_and_histogram_from_layers(self, x, layer_names):
-        outputs = []
-        for layer_name in layer_names:
-            layer = self.model.get_layer(layer_name)
-            outputs.append(layer.output)
-
-        model = Model(self.model.input, outputs)
-        y = model.predict(self.debug_x, steps=1)
-
-        result = []
-
-        for i, name in enumerate(layer_names):
-            # [0] we pick only the first in the batch
-            result.append(self._image_and_histogram(x, name, y[i][0]))
-
-        return result
-
-    def _image_and_histogram(self, x, layer, data):
-        h = np.histogram(data, bins=20)
-        if isinstance(layer, (
-                keras.layers.Conv2D,
-                keras.layers.UpSampling2D,
-                keras.layers.MaxPooling2D,
-                keras.layers.AveragePooling2D,
-                keras.layers.GlobalMaxPool2D,
-        )):
-            data = np.transpose(data, (2, 0, 1))
-            image = PIL.Image.fromarray(get_image_tales(data))
-        else:
-            if len(data.shape) > 1:
-                if len(data.shape) == 3:
-                    data = np.transpose(data, (2, 0, 1))
-                image = PIL.Image.fromarray(get_layer_vis_square(data))
-            else:
-                image = self.make_image_from_dense(data)
-
-        histogram = pack('<BIH', 1, int(x), h[0].size) + h[1].astype('<f').tobytes() + h[0].astype('<I').tobytes()
-
-        return self.pil_image_to_jpeg(image), histogram
-
-    def make_image_from_dense(self, neurons):
-        from .utils import array_to_img
-        cols = int(math.ceil(math.sqrt(len(neurons))))
-
-        even_length = cols * cols
-        diff = even_length - len(neurons)
-        if diff > 0:
-            neurons = np.append(neurons, np.zeros(diff, dtype=neurons.dtype))
-
-        img = array_to_img(neurons.reshape((1, cols, cols)))
-        img = img.resize((cols * 8, cols * 8))
-
-        return img
-
-    def pil_image_to_jpeg(self, image):
-        buffer = io.BytesIO()
-
-        image.save(buffer, format="JPEG", optimize=True, quality=70)
-        return buffer.getvalue()
+        self.context.watch_keras_model(model, self.debug_x)
 
     def on_train_begin(self, logs={}):
         self.start_time = time.time()
@@ -322,7 +99,7 @@ class KerasCallback(keras.callbacks.Callback):
                 traces.append('val_' + output.name)
 
         self.accuracy_metric = self.context.define_metric('accuracy', traces=traces)
-        self.loss_metric = self.context.define_metric('loss')
+        self.loss_metric = self.context.define_metric('loss', traces=['train', 'val'])
         self.learning_rate_metric = self.context.define_metric('learning rate', traces=['start', 'end'])
 
         self.context.epoch(0, self.params['epochs'])
@@ -348,15 +125,13 @@ class KerasCallback(keras.callbacks.Callback):
 
             self.current['nb_batches'] = nb_batches
             self.current['batch_size'] = batch_size
-            deepkit.set_info('Batch size', batch_size)
+            self.context.set_info('Batch size', batch_size)
 
         self.batch = batch
 
     def on_batch_end(self, batch, logs={}):
         self.filter_invalid_json_values(logs)
-
-        deepkit.batch(batch + 1, self.current['nb_batches'], logs['size'])
-        self.check_snapshot()
+        self.context.batch(batch + 1, self.current['nb_batches'], logs['size'])
 
     def on_epoch_begin(self, epoch, logs={}):
         self.epoch = epoch
@@ -372,9 +147,8 @@ class KerasCallback(keras.callbacks.Callback):
 
         self.send_metrics(logs, log['epoch'])
 
-        deepkit.epoch(log['epoch'], self.params['epochs'])
+        self.context.epoch(log['epoch'], self.params['epochs'])
         self.send_optimizer_info(log['epoch'])
-        self.check_snapshot(epoch_end=True)
 
     def send_metrics(self, log, x):
         accuracy_log_name = 'accuracy'
@@ -391,7 +165,8 @@ class KerasCallback(keras.callbacks.Callback):
         if loss is not None or val_loss is not None:
             if loss: loss = float(loss)
             if val_loss: val_loss = float(val_loss)
-            self.loss_metric.send(x, loss, val_loss)
+            print('loss, val_loss', loss, val_loss)
+            self.loss_metric.send(loss, val_loss, x=x)
 
         accuracy = [total_accuracy_training, total_accuracy_validation]
         if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
@@ -404,12 +179,12 @@ class KerasCallback(keras.callbacks.Callback):
                 losses.append(log.get(layer.name + '_loss', None))
                 losses.append(log.get('val_' + layer.name + '_loss', None))
 
-            self.all_losses.send(x, losses)
+            self.all_losses.send(*losses, x=x)
 
-        self.accuracy_metric.send(x, accuracy)
+        self.accuracy_metric.send(*accuracy, x=x)
 
     def send_optimizer_info(self, epoch):
-        self.learning_rate_metric.send(epoch, [self.learning_rate_start, self.get_learning_rate()])
+        self.learning_rate_metric.send(self.learning_rate_start, self.get_learning_rate(), x=epoch)
 
     def get_learning_rate(self):
         if hasattr(self.model, 'optimizer'):
@@ -425,8 +200,8 @@ class KerasCallback(keras.callbacks.Callback):
     def has_multiple_inputs(self):
         return len(self.model.inputs) > 1
 
-    def filter_invalid_json_values(self, dict):
-        for k, v in six.iteritems(dict):
+    def filter_invalid_json_values(self, dict: dict):
+        for k, v in dict.items():
             if isinstance(v, (np.ndarray, np.generic)):
                 dict[k] = v.tolist()
             if math.isnan(v) or math.isinf(v):

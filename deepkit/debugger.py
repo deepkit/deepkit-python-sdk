@@ -49,6 +49,12 @@ class DebuggerManager:
     def register_debugger(self, debugger):
         self.debuggers.append(debugger)
 
+    def on_disconnect(self):
+        for f in self.send_data_futures:
+            f.set_result(False)
+
+        self.send_data_futures = []
+
     def create_snapshot(self, x, layers):
         self.context.client.job_action_threadsafe('addSnapshot', [
             x,
@@ -64,6 +70,7 @@ class DebuggerManager:
         instance a fetch() call and send that data to the server.
         """
         if self.active_debug_data_for_this_run: return
+        if not self.context.client.is_connected(): return
 
         state = self.context.debugger_controller.state
         self.record_needed = state.recording

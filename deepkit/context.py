@@ -13,7 +13,6 @@ import numpy as np
 import psutil
 import typedload
 from rx import interval
-from torch import from_numpy
 
 import deepkit.debugger
 import deepkit.client
@@ -106,6 +105,8 @@ class Context:
         self.job_step = 0
         self.job_steps = 0
 
+        self.model_watching = dict()
+
         self.auto_x_of_metrix = dict()
 
         self.seconds_per_iteration = 0
@@ -126,6 +127,8 @@ class Context:
                 self.client.register_controller('job/' + self.client.job_id + '/debugger', self.debugger_controller)
 
                 asyncio.run_coroutine_threadsafe(self.debugger_controller.connected(), loop=self.client.loop)
+            else:
+                self.debugger.on_disconnect()
 
         self.client.connected.subscribe(on_connect)
 
@@ -151,9 +154,9 @@ class Context:
                     0,
                     time.time(),
                     # stretch to max precision of uint16
-                    int(((p.cpu_percent(interval=None) / 100) / psutil.cpu_count(False)) * 65535),
+                    min(65535, int(((p.cpu_percent(interval=None) / 100) / psutil.cpu_count(False)) * 65535)),
                     # stretch to max precision of uint16
-                    int((p.memory_percent() / 100) * 65535),
+                    min(65535, int((p.memory_percent() / 100) * 65535)),
                     float(net.bytes_recv),
                     float(net.bytes_sent),
                     float(disk.write_bytes),
@@ -334,18 +337,20 @@ class Context:
     def set_config(self, name: str, value: any):
         self.client.patch('config.config.' + name, value)
 
-    def define_metric(self, name: str, traces: List[str]):
+    def define_metric(self, name: str, traces: List[str] = None):
         name = name.replace('.', '/')
+        if not traces:
+            traces = ['0']
         self.defined_metrics[name] = {'traces': traces}
         self.client.job_action_threadsafe('defineMetric', [name, self.defined_metrics[name]])
 
         context = self
 
         class Controller:
-            def send(self, x=None, y=None):
-                context.metric(name, x=x, y=y)
+            def send(self, *y, x=None):
+                context.metric(name, *y, x=x)
 
-        return Controller
+        return Controller()
 
     def add_file(self, path: str):
         self.client.job_action_threadsafe('uploadFile',
@@ -353,9 +358,6 @@ class Context:
 
     def add_file_content(self, path: str, content: bytes):
         self.client.job_action_threadsafe('uploadFile', [path, base64.b64encode(content).decode('utf8')])
-
-    def set_model_graph(self, graph: dict):
-        self.client.job_action_threadsafe('setModelGraph', [graph])
 
     def set_list(self, name: str):
         self.client.job_action_threadsafe('setList', [name])
@@ -384,16 +386,80 @@ class Context:
         v = self.get_config(path, None)
         return v if v is not None else default
 
+    def watch_keras_model(self, model, model_input=None, name=None, is_batch=True):
+        if model in self.model_watching: return
+        self.model_watching[model] = True
+
+        from deepkit.tf import TFDebugger, extract_model_graph
+        name = name if name else model.name
+
+        graph, record_map, input_names = extract_model_graph(model)
+        debugger = TFDebugger(self.debugger, model, model_input, name, record_map, is_batch, input_names)
+
+        if not model_input:
+            # we monkey patch entry methods to keras so we automatically fetch the model_input
+            ori_fit_generator = model.fit_generator
+            ori_fit = model.fit
+            ori_train_on_batch = model.train_on_batch
+            ori_predict = model.predict
+
+            def get_x(x):
+                # resize batches to size 1 if is_batch=True
+                if len(input_names) == 1:
+                    return np.array([x[0]] if is_batch else x)
+                else:
+                    return [np.array([v[0]]) if is_batch else v for v in x]
+
+            def fit_generator(generator, *args, **kwargs):
+                if debugger.model_input is None:
+                    debugger.model_input = get_x(next(generator))
+                return ori_fit_generator(generator, *args, **kwargs)
+
+            model.fit_generator = fit_generator
+
+            def fit(x=None, *args, **kwargs):
+                if debugger.model_input is None:
+                    debugger.model_input = get_x(x)
+                return ori_fit(x, *args, **kwargs)
+
+            model.fit = fit
+
+            def train_on_batch(x=None, *args, **kwargs):
+                if debugger.model_input is None:
+                    # we want only one item of the batch
+                    if len(input_names) == 1:
+                        debugger.model_input = np.array([x[0]])
+                    else:
+                        debugger.model_input = [np.array([v[0]]) for v in x]
+                return ori_train_on_batch(x, *args, **kwargs)
+
+            model.train_on_batch = train_on_batch
+
+            def predict(x=None, *args, **kwargs):
+                if debugger.model_input is None:
+                    debugger.model_input = get_x(x)
+                return ori_predict(x, *args, **kwargs)
+
+            model.predict = predict
+
+        self.debugger.register_debugger(debugger)
+        self.client.job_action_threadsafe('setModelGraph', [graph, name])
+        return debugger
+
     def watch_torch_model(self, model, name='main'):
+        if model in self.model_watching: return
+        self.model_watching[model] = True
         from deepkit.pytorch import TorchDebugger
 
         def resolve_map(inputs):
-            graph, record_map, input_names, output_names = self.set_torch_model(model, name=name, inputs=inputs)
+            graph, record_map, input_names, output_names = self._set_torch_model(model, name=name, inputs=inputs)
             return record_map, input_names, output_names
 
-        self.debugger.register_debugger(TorchDebugger(self.debugger, model, name, resolve_map))
+        debugger = TorchDebugger(self.debugger, model, name, resolve_map)
+        self.debugger.register_debugger(debugger)
+        return debugger
 
-    def set_torch_model(self, model, input_shape=None, input_sample=None, inputs=None, name='main'):
+    def _set_torch_model(self, model, input_shape=None, input_sample=None, inputs=None, name='main'):
         """
         Extracts the computation graph using either the given input_shape with random data
         or the given (real) input_sample. If you have multiple models per training, use the name
@@ -406,9 +472,11 @@ class Context:
         :param name: optional name if you have multiple models
         :return:
         """
+        from torch import from_numpy
+        from deepkit.pytorch import get_pytorch_graph
+
         if not inputs and not input_shape and input_sample is None:
             raise Exception('No inputs, input_shape and no input_sample given. Specify either of those.')
-        from deepkit.pytorch import get_pytorch_graph
         xs = inputs
 
         if xs is None:
@@ -437,12 +505,14 @@ class Context:
         self.client.job_action_threadsafe('setModelGraph', [graph, name])
         return graph, record_map, input_names, output_names
 
-    def metric(self, name: str, x=None, y=None):
+    def metric(self, name: str, *y, x=None):
         if y is None:
             y = 0
 
-        if not isinstance(y, list):
+        if not isinstance(y, (list, tuple)):
             y = [y]
+
+        y = [float(v) for v in y]
 
         if x is None:
             if self.job_steps > 0:

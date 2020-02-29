@@ -10,7 +10,7 @@ import deepkit.context
 import deepkit.debugger
 from deepkit.pytorch_graph import build_graph
 from deepkit.utils import array_to_img
-from deepkit.utils.image import get_layer_vis_square, get_image_tales
+from deepkit.utils.image import get_layer_vis_square, get_image_tales, make_image_from_dense
 
 blacklist_attributes = {'weight', 'dump_patches'}
 
@@ -103,14 +103,6 @@ def get_pytorch_graph(net, inputs):
         known_modules_map[module] = name
         known_modules_name_map[name] = module
 
-    def get_parent_names(name):
-        t = ''
-        for i in name.split('.')[:-1]:
-            if t:
-                t += '.'
-            t += i
-            yield t
-
     def get_parent(name, go_up=1) -> str:
         return '.'.join(name.split('.')[:go_up * -1])
 
@@ -121,7 +113,7 @@ def get_pytorch_graph(net, inputs):
         scope_id = get_scope_id(node.debugName)
 
         if node.kind == 'prim::ListConstruct':
-            # if that list constrcutor has only inputs of the same scope, ignore it
+            # if that list constructor has only inputs of the same scope, ignore it
             all_scope = True
             for input in node.inputs:
                 if get_scope_id(input) != scope_id:
@@ -148,68 +140,40 @@ def get_pytorch_graph(net, inputs):
     for node in torch_nodes.values():
         if node.debugName not in names_from_debug: continue
         layer_id = names_from_debug[node.debugName]
-        short_layer_id = scopes_from_debug[node.debugName]
+        scope_id = scopes_from_debug[node.debugName]
 
         # print(node.debugName, '=>', layer_id, short_layer_id, node.kind, node.tensor_size)
-        for parent in get_parent_names(layer_id):
-            container_names[parent] = True
+        edges[layer_id] = set()
 
         for input in node.inputs:
             if layer_id not in edges_internal: edges_internal[layer_id] = []
             edges_internal[layer_id].append(input)
 
-            if input in names_from_debug and layer_id != names_from_debug[input] \
-                    and short_layer_id != names_from_debug[input]:
-                # print('   outgoing', names_from_debug[input], scopes_from_debug[input], input,
-                #       nodes_from_id[names_from_debug[input]].kind)
-                # this node points out of itself, so create an edge
-                edge_to = names_from_debug[input]
+            # filter unknown nodes
+            if input not in names_from_debug: continue
 
-                if layer_id in edges:
-                    edges[layer_id].add(edge_to)
-                else:
-                    edges[layer_id] = set([edge_to])
+            # reference to itself is forbidden
+            if layer_id == names_from_debug[input]: continue
 
-    # def resolve_edges_to_known_layer(from_layer: str, inputs: Set[str]) -> List[str]:
-    #     new_inputs = set()
-    #     short_name = names_to_scope[from_layer] if from_layer in names_to_scope else None
-    #     parent_name = get_parent(short_name) if short_name else None
-    #
-    #     # parent_layer = get_parent(from_layer)
-    #     for input in inputs:
-    #         input_short_name = names_to_scope[input] if input in names_to_scope else None
-    #
-    #         # we skip connection where even the 2. parent is not the same or a child of from_layer.
-    #         # we could make this configurable.
-    #         second_parent = get_parent(input_short_name, 2)
-    #         if second_parent and short_name and not short_name.startswith(second_parent):
-    #             continue
-    #
-    #         if input_short_name and short_name and short_name != input_short_name and input_short_name in known_modules_name_map:
-    #             if not parent_name or (parent_name != input_short_name):
-    #                 new_inputs.add(input_short_name)
-    #                 continue
-    #
-    #         if input in edges:
-    #             for i in resolve_edges_to_known_layer(from_layer, edges[input]):
-    #                 new_inputs.add(i)
-    #         else:
-    #             # we let it as is
-    #             new_inputs.add(input)
-    #
-    #     return list(new_inputs)
+            # reference to its scope is forbidden
+            if scope_id == names_from_debug[input]: continue
+
+            # print('   outgoing', names_from_debug[input], scopes_from_debug[input], input,
+            #       nodes_from_id[names_from_debug[input]].kind)
+            # this node points out of itself, so create an edge
+            edge_to = names_from_debug[input]
+            edges[layer_id].add(edge_to)
 
     deepkit_nodes = []
 
     nodes_names_to_display = set()
-    scopes = dict()
 
-    def collect_inputs(inputs):
+    def collect_nodes_to_display(inputs):
         for input in inputs:
             if input not in nodes_names_to_display:
                 nodes_names_to_display.add(input)
                 if input in edges:
-                    collect_inputs(edges[input])
+                    collect_nodes_to_display(edges[input])
 
     def find_outputs(name: str, outputs: set):
         kind = nodes_from_id[name].kind
@@ -228,7 +192,7 @@ def get_pytorch_graph(net, inputs):
 
     for name in edges.copy().keys():
         if name.startswith('output/'):
-            collect_inputs(edges[name])
+            collect_nodes_to_display(edges[name])
 
             # resolve first to first nodes with available shape, and then use those as output
             # this is necessary since tuple outputs come via prim::TupleConstruct and no shape.
@@ -246,18 +210,18 @@ def get_pytorch_graph(net, inputs):
 
                 nodes_names_to_display.add(new_name)
 
-    activation_functions = {
-        'ReLU6'.lower(),
-        'LogSigmoid'.lower(),
-        'LeakyReLU'.lower(),
-        'MultiheadAttention'.lower(),
+    activation_functions = set(map(str.lower, [
+        'ReLU6',
+        'LogSigmoid',
+        'LeakyReLU',
+        'MultiheadAttention',
         'elu', 'hardshrink', 'hardtanh', 'leaky_relu', 'logsigmoid', 'prelu',
         'rrelu', 'relu',
         'sigmoid', 'elu', 'celu', 'selu', 'glu', 'gelu', 'softplus', 'softshrink', 'softsign',
         'tanh', 'tanhshrink',
-        'softmin', 'softmax', 'softmax2d', 'log_softmax', 'LogSoftmax'.lower(),
-        'AdaptiveLogSoftmaxWithLoss'.lower()
-    }
+        'softmin', 'softmax', 'softmax2d', 'log_softmax', 'LogSoftmax',
+        'AdaptiveLogSoftmaxWithLoss'
+    ]))
 
     input_names = []
     output_names = []
@@ -344,8 +308,8 @@ def get_pytorch_graph(net, inputs):
         }
         deepkit_nodes.append(node)
 
+    scopes = []
     for name, module in known_modules_name_map.items():
-
         # skip modules that are already added as nodes
         if name in scope_nodes and len(scope_nodes[name]) == 1:
             continue
@@ -363,7 +327,7 @@ def get_pytorch_graph(net, inputs):
             'recordable': recordable,
             'attributes': extract_attributes(module)
         }
-        scopes[scope_id] = scope
+        scopes.append(scope)
 
     graph = {
         'nodes': deepkit_nodes,
@@ -414,7 +378,8 @@ class TorchDebugger:
 
         self.net.apply(self.register_hook)
 
-    def fetch(self, fetch_config: deepkit.debugger.DebuggerFetchConfig) -> Dict[str, deepkit.debugger.DebuggerFetchItem]:
+    def fetch(self, fetch_config: deepkit.debugger.DebuggerFetchConfig) -> Dict[
+        str, deepkit.debugger.DebuggerFetchItem]:
         self.fetch_config = fetch_config
         self.fetch_result = dict()
 
@@ -453,19 +418,6 @@ class TorchDebugger:
 
         module.register_forward_hook(hook)
 
-    def make_image_from_dense(self, neurons):
-        cols = int(math.ceil(math.sqrt(len(neurons))))
-
-        even_length = cols * cols
-        diff = even_length - len(neurons)
-        if diff > 0:
-            neurons = np.append(neurons, np.zeros(diff, dtype=neurons.dtype))
-
-        img = array_to_img(neurons.reshape((1, cols, cols)))
-        img = img.resize((cols * 8, cols * 8))
-
-        return img
-
     def get_histogram(self, x, tensor):
         h = np.histogram(tensor.detach().numpy(), bins=20)
         # <version><x><bins><...x><...y>, little endian
@@ -482,7 +434,7 @@ class TorchDebugger:
         if hasattr(output, 'shape'):
             activations = self.get_histogram(x, output)
 
-            if len(output.shape) > 0:
+            if len(output.shape) > 1:
                 # outputs come in batch usually, so pick first
                 sample = output[0].detach().numpy()
                 if len(sample.shape) == 3:
@@ -492,8 +444,12 @@ class TorchDebugger:
                         image = PIL.Image.fromarray(get_image_tales(sample))
                 elif len(sample.shape) > 1:
                     image = PIL.Image.fromarray(get_layer_vis_square(sample))
-                else:
-                    image = self.make_image_from_dense(sample)
+                elif len(sample.shape) == 1:
+                    if sample.shape[0] == 1:
+                        # we got a single number
+                        output = sample[0]
+                    else:
+                        image = make_image_from_dense(sample)
         # elif isinstance(output[0], (float, str, int)):
         #     image = output
 
@@ -509,8 +465,10 @@ class TorchDebugger:
         output_rep = None
         if isinstance(image, PIL.Image.Image):
             output_rep = image
-        elif isinstance(output, (float, int)):
-            output_rep = output
+        elif isinstance(output, (float, np.floating)):
+            output_rep = float(output)
+        elif isinstance(output, (int, np.integer)):
+            output_rep = int(output)
 
         return output_rep, activations, whistogram, bhistogram
 
