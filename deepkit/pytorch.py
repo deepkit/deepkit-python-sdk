@@ -6,7 +6,7 @@ from typing import Dict, Optional
 import PIL.Image
 import numpy as np
 
-import deepkit.context
+import deepkit.experiment
 import deepkit.debugger
 from deepkit.pytorch_graph import build_graph
 from deepkit.utils import array_to_img

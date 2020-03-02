@@ -18,7 +18,7 @@ import deepkit.debugger
 import deepkit.client
 import deepkit.globals
 import deepkit.utils
-from deepkit.model import ContextOptions
+from deepkit.model import ExperimentOptions
 
 
 def get_job_config():
@@ -82,10 +82,10 @@ class JobDebuggerController:
         self.state = typedload.load(await self.client.job_action('getDebuggingState'), JobDebuggingState)
 
 
-class Context:
-    def __init__(self, options: ContextOptions = None):
+class Experiment:
+    def __init__(self, options: ExperimentOptions = None):
         if options is None:
-            options = ContextOptions()
+            options = ExperimentOptions()
 
         self.metric_buffer = []
         self.speed_buffer = []
@@ -93,7 +93,7 @@ class Context:
         self.last_throttle_call = dict()
 
         self.client = deepkit.client.Client(options)
-        deepkit.globals.last_context = self
+        deepkit.globals.last_experiment = self
         self.log_lock = Lock()
         self.defined_metrics = {}
         self.shutting_down = False
@@ -237,6 +237,10 @@ class Context:
         self.debugger.tick()
 
     def iteration(self, current: int, total: Optional[int]):
+        if current and self.job_iteration == current:
+            # nothing to do
+            return
+
         self.job_iteration = current
         if total:
             self.job_iterations = total
@@ -272,19 +276,27 @@ class Context:
         else:
             self.client.patch('eta', 0)
 
-    def batch(self, current: int, total: int = None, size: int = None):
+    def batch(self, current: int, total: int = None, size: int = 1):
         self.step(current, total, size)
 
-    def step(self, current: int, total: int = None, size: int = None):
+    def step(self, current: int, total: int = None, size: int = 1):
+        if current and self.job_steps == current:
+            # nothing to do
+            return
+
         self.job_step = current
         if total is not None:
             self.job_steps = total
+        if total is None:
+            total = self.job_steps
 
         self.client.patch('step', current)
         now = time.time()
 
         x = self.job_iteration + (current / total)
-        speed_per_second = size / (now - self.last_batch_time) if self.last_batch_time else size
+        speed_per_second = 0
+        if size:
+            speed_per_second = size / (now - self.last_batch_time) if self.last_batch_time else size
 
         if self.last_batch_time:
             self.seconds_per_iterations.append({
@@ -312,7 +324,7 @@ class Context:
 
         speed = struct.pack('<Bddd', 1, float(x), now, float(speed_per_second))
         self.speed_buffer.append(speed)
-        self.throttle_call(self.drain_logs)
+        self.drain_logs()
 
         if total:
             self.client.patch('steps', total)
@@ -323,7 +335,7 @@ class Context:
         self.client.patch('title', s)
 
     def set_info(self, name: str, value: any):
-        self.client.patch('infos.' + str(name), value)
+        self.client.patch('infos.' + str(name.replace('.', '/')), value)
 
     def set_description(self, description: any):
         self.client.patch('description', description)
@@ -335,7 +347,7 @@ class Context:
         self.client.job_action_threadsafe('removeLabel', [label_name])
 
     def set_config(self, name: str, value: any):
-        self.client.patch('config.config.' + name, value)
+        self.client.patch('config.config.' + name.replace('.', '/'), value)
 
     def define_metric(self, name: str, traces: List[str] = None):
         name = name.replace('.', '/')
@@ -344,11 +356,11 @@ class Context:
         self.defined_metrics[name] = {'traces': traces}
         self.client.job_action_threadsafe('defineMetric', [name, self.defined_metrics[name]])
 
-        context = self
+        that = self
 
         class Controller:
             def send(self, *y, x=None):
-                context.metric(name, *y, x=x)
+                that.metric(name, *y, x=x)
 
         return Controller()
 
@@ -371,19 +383,19 @@ class Context:
         return res
 
     def intconfig(self, path, default=None):
-        v = self.get_config(path, None)
+        v = self.get_config(path, default)
         return int(v) if v is not None else default
 
     def floatconfig(self, path, default=None):
-        v = self.get_config(path, None)
+        v = self.get_config(path, default)
         return float(v) if v is not None else default
 
     def boolconfig(self, path, default=None):
-        v = self.get_config(path, None)
+        v = self.get_config(path, default)
         return bool(v) if v is not None else default
 
     def config(self, path, default=None):
-        v = self.get_config(path, None)
+        v = self.get_config(path, default)
         return v if v is not None else default
 
     def watch_keras_model(self, model, model_input=None, name=None, is_batch=True):
@@ -403,41 +415,30 @@ class Context:
             ori_train_on_batch = model.train_on_batch
             ori_predict = model.predict
 
-            def get_x(x):
-                # resize batches to size 1 if is_batch=True
-                if len(input_names) == 1:
-                    return np.array([x[0]] if is_batch else x)
-                else:
-                    return [np.array([v[0]]) if is_batch else v for v in x]
-
             def fit_generator(generator, *args, **kwargs):
                 if debugger.model_input is None:
-                    debugger.model_input = get_x(next(generator))
+                    debugger.set_input(generator)
                 return ori_fit_generator(generator, *args, **kwargs)
 
             model.fit_generator = fit_generator
 
             def fit(x=None, *args, **kwargs):
                 if debugger.model_input is None:
-                    debugger.model_input = get_x(x)
+                    debugger.set_input(x)
                 return ori_fit(x, *args, **kwargs)
 
             model.fit = fit
 
             def train_on_batch(x=None, *args, **kwargs):
                 if debugger.model_input is None:
-                    # we want only one item of the batch
-                    if len(input_names) == 1:
-                        debugger.model_input = np.array([x[0]])
-                    else:
-                        debugger.model_input = [np.array([v[0]]) for v in x]
+                    debugger.set_input(x)
                 return ori_train_on_batch(x, *args, **kwargs)
 
             model.train_on_batch = train_on_batch
 
             def predict(x=None, *args, **kwargs):
                 if debugger.model_input is None:
-                    debugger.model_input = get_x(x)
+                    debugger.set_input(x)
                 return ori_predict(x, *args, **kwargs)
 
             model.predict = predict
@@ -512,7 +513,7 @@ class Context:
         if not isinstance(y, (list, tuple)):
             y = [y]
 
-        y = [float(v) for v in y]
+        y = [float(v) if v is not None else 0 for v in y]
 
         if x is None:
             if self.job_steps > 0:
@@ -539,7 +540,7 @@ class Context:
 
         self.client.patch('channelLastValues.' + name, y)
         self.metric_buffer.append({'id': name, 'row': row_binary})
-        self.throttle_call(self.drain_metric_buffer)
+        self.drain_metric_buffer()
 
     def create_keras_callback(self, debug_x=None):
         from .deepkit_keras import KerasCallback
@@ -549,4 +550,4 @@ class Context:
 
     def log(self, s: str):
         self.logs_buffer.append(s)
-        self.throttle_call(self.drain_logs)
+        self.drain_logs()

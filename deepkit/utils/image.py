@@ -49,7 +49,7 @@ def make_image_from_dense(neurons):
         neurons = np.append(neurons, np.zeros(diff, dtype=neurons.dtype))
 
     img = array_to_img(neurons.reshape((1, cols, cols)))
-    img = img.resize((cols * 8, cols * 8))
+    img = img.resize((cols * 8, cols * 8), PIL.Image.NEAREST)
 
     return img
 

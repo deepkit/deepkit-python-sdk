@@ -5,7 +5,6 @@ import math
 import os
 import sys
 import time
-
 import numpy as np
 
 if 'keras' in sys.modules:
@@ -48,12 +47,9 @@ class KerasCallback(keras.callbacks.Callback):
     def __init__(self, debug_x=None):
         super(KerasCallback, self).__init__()
 
-        self.context = deepkit.context()
+        self.experiment = deepkit.experiment()
 
         self.debug_x = debug_x
-
-        self.epoch = 0
-        self.batch = 0
 
         self.data_validation = None
         self.data_validation_size = None
@@ -68,22 +64,22 @@ class KerasCallback(keras.callbacks.Callback):
 
     def set_model(self, model):
         super().set_model(model)
-        self.context.watch_keras_model(model, self.debug_x)
+        self.experiment.watch_keras_model(model, self.debug_x)
 
     def on_train_begin(self, logs={}):
         self.start_time = time.time()
         self.last_batch_time = time.time()
 
-        self.context.epoch(0, self.params['epochs'])
-        self.context.set_info('parameters', get_total_params(self.model))
+        self.experiment.set_info('parameters', get_total_params(self.model))
+        self.experiment.set_info('keras.image_data_format', keras.backend.image_data_format())
 
         # self.job_backend.upload_keras_graph(self.model)
 
         if self.model.optimizer and hasattr(self.model.optimizer, 'get_config'):
             config = self.model.optimizer.get_config()
-            # deepkit.set_info('optimizer', type(self.model.optimizer).__name__)
+            self.experiment.set_info('optimizer', str(type(self.model.optimizer).__name__))
             for i, v in config.items():
-                self.context.set_info('optimizer.' + str(i), v)
+                self.experiment.set_info('optimizer.' + str(i), v)
 
         # compatibility with keras 1.x
         if 'epochs' not in self.params and 'nb_epoch' in self.params:
@@ -98,18 +94,18 @@ class KerasCallback(keras.callbacks.Callback):
                 traces.append('train_' + output.name)
                 traces.append('val_' + output.name)
 
-        self.accuracy_metric = self.context.define_metric('accuracy', traces=traces)
-        self.loss_metric = self.context.define_metric('loss', traces=['train', 'val'])
-        self.learning_rate_metric = self.context.define_metric('learning rate', traces=['start', 'end'])
+        self.accuracy_metric = self.experiment.define_metric('accuracy', traces=traces)
+        self.loss_metric = self.experiment.define_metric('loss', traces=['train', 'val'])
+        self.learning_rate_metric = self.experiment.define_metric('learning rate', traces=['start', 'end'])
 
-        self.context.epoch(0, self.params['epochs'])
+        self.experiment.epoch(1, self.params['epochs'])
         if hasattr(self.model, 'output_layers') and len(self.model.output_layers) > 1:
             loss_traces = []
             for output in self.model.output_layers:
                 loss_traces.append('train_' + output.name)
                 loss_traces.append('val_' + output.name)
 
-            self.all_losses = self.context.define_metric('loss_all', traces=loss_traces)
+            self.all_losses = self.experiment.define_metric('loss_all', traces=loss_traces)
 
         # if self.force_insights or self.job_model.insights_enabled:
         #     images = self.build_insight_images()
@@ -125,16 +121,14 @@ class KerasCallback(keras.callbacks.Callback):
 
             self.current['nb_batches'] = nb_batches
             self.current['batch_size'] = batch_size
-            self.context.set_info('Batch size', batch_size)
-
-        self.batch = batch
+            self.experiment.set_info('Batch size', batch_size)
 
     def on_batch_end(self, batch, logs={}):
         self.filter_invalid_json_values(logs)
-        self.context.batch(batch + 1, self.current['nb_batches'], logs['size'])
+        self.experiment.batch(batch + 1, self.current['nb_batches'], logs['size'])
 
     def on_epoch_begin(self, epoch, logs={}):
-        self.epoch = epoch
+        self.experiment.epoch(epoch + 1, self.params['epochs'])
         self.learning_rate_start = self.get_learning_rate()
 
     def on_epoch_end(self, epoch, logs={}):
@@ -146,8 +140,6 @@ class KerasCallback(keras.callbacks.Callback):
         log['epoch'] = epoch + 1
 
         self.send_metrics(logs, log['epoch'])
-
-        self.context.epoch(log['epoch'], self.params['epochs'])
         self.send_optimizer_info(log['epoch'])
 
     def send_metrics(self, log, x):

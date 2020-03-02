@@ -1,6 +1,1 @@
-keras>2.0.0,<=2.2.5
-tensorflow-gpu<=1.14.0
-image
-deepkit
-websockets>=8.1
-rx>=1.5
+keras>2.0.0

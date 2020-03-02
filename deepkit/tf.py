@@ -6,7 +6,12 @@ from typing import Dict, Optional, List
 
 import PIL.Image
 import numpy as np
-from tensorflow.python.keras import backend as K
+if 'keras' in sys.modules:
+    import keras
+else:
+    import tensorflow.keras as keras
+
+import tensorflow as tf
 
 import deepkit.debugger
 from deepkit.utils.image import get_layer_vis_square, get_image_tales, make_image_from_dense
@@ -114,6 +119,9 @@ def extract_model_graph(model):
     def tensor_name_to_node_name(name: str) -> str:
         return name[0:name.rindex(':')]
 
+    def get_parent(name, go_up=1) -> str:
+        return '/'.join(name.split('/')[:go_up * -1])
+
     def get_scope_id(name: str):
         """
         Takes a name like 'dense_2/MatMul' and converts it to its scope `dense_2`.
@@ -128,12 +136,14 @@ def extract_model_graph(model):
     edges = dict()
     nodes = dict()
     names_to_scope = dict()
+    scope_nodes = dict()
     input_names = []
     output_names = []
 
-    g = K.get_graph()
+    output_tensor = model.outputs[0] if hasattr(model, 'outputs') else model.output
+    g = output_tensor.graph
     tf_nodes = list(g.as_graph_def(add_shapes=True).node)
-    blacklist = {'Placeholder', 'Const'}
+    blacklist = {'Placeholder', 'PlaceholderWithDefault', 'Const'}
 
     model_scoped_layer_names = set()
     model_unique_layer_names = set()
@@ -187,7 +197,13 @@ def extract_model_graph(model):
         if node.op in blacklist and not is_input: continue
 
         nodes[node.name] = node
-        names_to_scope[node.name] = get_scope_id(node.name)
+        scope_id = get_scope_id(node.name)
+        names_to_scope[node.name] = scope_id
+
+        if scope_id not in scope_nodes:
+            scope_nodes[names_to_scope[node.name]] = []
+
+        scope_nodes[scope_id].append(node.name)
 
     for node in nodes.values():
         edges[node.name] = set()
@@ -221,8 +237,14 @@ def extract_model_graph(model):
     record_map = dict()
 
     primitive = {'Identity'}
+
+    # shows those layers activation nodes.
     activations = {'elu', 'softmax', 'selu', 'softplus', 'softsign', 'relu', 'tanh', 'sigmoid', 'hard_sigmoid',
-                   'exponential', 'linear'}
+                   'exponential', 'linear', 'leakyrelu'}
+
+    # show as type 'layer' when no `activation` or linear activation has been set. This
+    # hides internals of those layers in the graph.
+    layers = {'Embedding', 'Flatten', 'Dense', 'Dropout', 'Reshape', 'BatchNormalization', 'UpSampling2D', 'Conv2D'}
 
     for i, output in enumerate(model.outputs):
         name = tensor_name_to_node_name(output.name)
@@ -250,6 +272,7 @@ def extract_model_graph(model):
         scope_id = names_to_scope[name]
         node_label = name
         node_type = 'op'
+        node = nodes[name]
         node_sub_type: str = nodes[name].op
         inputs = edges[name] if name in edges else []
         recordable = True
@@ -278,6 +301,23 @@ def extract_model_graph(model):
                 record_map[name] = name + ':0'
             except:
                 recordable = False
+
+        is_collapsible = node_sub_type != 'Sequential'
+        if scope_id and is_collapsible and scope_id in scope_nodes and len(scope_nodes[scope_id]) == 1:
+            # the scope has only one item, so collapse it.
+            parent_scope_id = get_parent(scope_id)
+            if scope_id not in nodes:
+                scope_id = parent_scope_id
+
+        # is_collapsible = node_sub_type != 'Sequential'
+        # while scope_id and is_collapsible and scope_id in scope_nodes and len(scope_nodes[scope_id]) == 1:
+        #     # the scope has only one item, so collapse it.
+        #     scope_id = get_parent(scope_id)
+        #     if scope_id in nodes:
+        #         is_collapsible = nodes[scope_id].op != 'Sequential'
+        #         inputs = edges[scope_id]
+        #     else:
+        #         is_collapsible = False
 
         node = {
             'id': name,
@@ -311,14 +351,41 @@ def extract_model_graph(model):
 
             if recordable:
                 # we track here the actual layer, because it contains the weights/biases correctly
-                record_map[layer.name] = layer.name
+                tensor = layer.outputs[0] if hasattr(layer, 'outputs') else layer.output
+                # sub tensors must have the layer name as prefix. If this is not the case
+                # it references the wrong tensor. We make here sure the correct sub tensor
+                # is chosen and not one from a shadow/sibling graph.
+                # 1. scope_prefix='', layer=Dense1 and tensor is like 'dense_1/Relu' which is correct
+                # 2. scope_prefix='', layer=Sequential1 and tensor is like 'activation/tanh', but we need 'sequential_1/activation/tanh'
+                # 3. scope_prefix='sequential_1', layer=Dense2, tensor is like 'dense_1/Relu', but we need 'sequential_1/dense_2/Relu'
+                if '/' in tensor.name and not tensor.name.startswith(scope_prefix + layer.name + '/'):
+                    if tensor.name.startswith(layer.name + '/'):
+                        tensor = g.get_tensor_by_name(scope_prefix + tensor.name)
+                    else:
+                        tensor = g.get_tensor_by_name(scope_prefix + layer.name + '/' + tensor.name)
+
+                record_map[scope_prefix + layer.name] = {
+                    'layer': layer,
+                    'tensor': tensor
+                }
+
+            node_sub_type = type(layer).__name__
+            node_type = 'scope'
+
+            if node_sub_type in layers:
+                if not hasattr(layer, 'activation') or layer.activation is None or layer.activation.__name__ == 'linear':
+                    # once the layer has a custom activation function, we don't collapse it to a layer type
+                    # since that wouldn't be visible in the graph anymore.
+                    node_type = 'layer'
 
             dk_scopes.append({
                 'id': scope_prefix + layer.name,
                 'label': layer.name,
-                'subType': type(layer).__name__,
+                'type': node_type,
+                'subType': node_sub_type,
                 'attributes': extract_attributes(layer),
                 'recordable': recordable,
+                'shape': layer.output_shape,
             })
 
             if isinstance(layer, Model):
@@ -349,6 +416,9 @@ class TFDebugger:
 
     def set_input(self, x):
         # resize batches to size 1 if is_batch=True
+        if isinstance(x, tf.data.Dataset):
+            x = next(iter(x))[0]
+
         if len(self.input_names) == 1:
             self.model_input = np.array([x[0]] if self.is_batch else x)
         else:
@@ -389,12 +459,10 @@ class TFDebugger:
             jpeg, ahistogram = data[i]
             whistogram = None
             bhistogram = None
-            tensor_or_layer_name = self.record_map[name]
-            try:
-                self.model.get_layer(tensor_or_layer_name)
-                whistogram, bhistogram = self.get_weight_histogram_from_layer(self.fetch_config.x, tensor_or_layer_name)
-            except:
-                pass
+            tensor_or_layer_dict = self.record_map[name]
+            if isinstance(tensor_or_layer_dict, dict):
+                layer = tensor_or_layer_dict['layer']
+                whistogram, bhistogram = self.get_weight_histogram_from_layer(self.fetch_config.x, layer)
 
             node_id = self.graph_name + ':' + name
             self.fetch_result[node_id] = deepkit.debugger.DebuggerFetchItem(
@@ -425,26 +493,26 @@ class TFDebugger:
 
     def get_image_and_histogram_from_layers(self, x, names):
         outputs = []
+        output_tensor = self.model.outputs[0] if hasattr(self.model, 'outputs') else self.model.output
+        g = output_tensor.graph
         for name in names:
-            tensor_or_layer_name = self.record_map[name]
-            try:
-                layer = self.model.get_layer(tensor_or_layer_name)
-                outputs.append(layer.outputs[0] if hasattr(layer, 'outputs') else layer.output)
-            except:
-                tensor = K.get_graph().get_tensor_by_name(tensor_or_layer_name)
+            tensor_name_or_layer_dict = self.record_map[name]
+            if isinstance(tensor_name_or_layer_dict, str):
+                tensor = g.get_tensor_by_name(tensor_name_or_layer_dict)
                 outputs.append(tensor)
+            else:
+                layer_dict = tensor_name_or_layer_dict
+                outputs.append(layer_dict['tensor'])
 
         inputs = self.model.inputs if hasattr(self.model, 'inputs') else self.model.input
-        model = Model(inputs, outputs)
-        y = model.predict(self.model_input, steps=1)
+
+        fn = keras.backend.function(inputs, outputs)
+        y = fn(self.model_input)
 
         result = []
 
-        for i, name in enumerate(names):
-            if len(outputs) == 1:
-                result.append(self._image_and_histogram(x, y))
-            else:
-                result.append(self._image_and_histogram(x, y[i]))
+        for i, _ in enumerate(names):
+            result.append(self._image_and_histogram(x, y[i]))
 
         return result
 
@@ -462,8 +530,10 @@ class TFDebugger:
                 shape = output.shape[1:] # first is batch shizzle
 
             if len(shape) == 3:
-                sample = np.transpose(sample, (2, 0, 1))
-                if shape[0] == 3:
+                if keras.backend.image_data_format() == 'channels_last':
+                    sample = np.transpose(sample, (2, 0, 1))
+
+                if sample.shape[0] == 3:
                     image = PIL.Image.fromarray(get_layer_vis_square(sample))
                 else:
                     image = PIL.Image.fromarray(get_image_tales(sample))
@@ -489,8 +559,8 @@ class TFDebugger:
 
         return output_rep, histogram
 
-    def get_weight_histogram_from_layer(self, x, layer_name: str):
-        layer_weights = self.model.get_layer(layer_name).get_weights()
+    def get_weight_histogram_from_layer(self, x, layer):
+        layer_weights = layer.get_weights()
         weights = None
 
         if len(layer_weights) > 0:

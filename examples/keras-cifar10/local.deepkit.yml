@@ -1,0 +1,16 @@
+label: TF1 Keras Cifar10 Partial Host/Local
+
+ignore:
+    - 'report.*'
+    - saved_models
+
+output: saved_models
+
+config:
+    lr: 0.8
+    batch_size: 128
+    epochs: 15
+    train_samples: 60000
+    test_samples: 10000
+
+command: /usr/local/Cellar/python/3.7.6_1/bin/python3 model.py

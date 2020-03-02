@@ -3,13 +3,9 @@ import datetime
 import tensorflow as tf
 from tensorflow.keras import Model, layers, optimizers, datasets
 import deepkit
-from deepkit import ContextOptions
 
-context = deepkit.context(ContextOptions(
-    # account='peter',
-    # project='deepkitorg/tf2-keras-mnist'
-))
-context.add_file('model.py')
+experiment = deepkit.experiment()
+experiment.add_file('model.py')
 
 (x, y), (x_val, y_val) = datasets.fashion_mnist.load_data()
 x = x.reshape(x.shape[0], 28, 28, 1)
@@ -33,7 +29,6 @@ train_dataset = tf.data.Dataset.from_generator(
     # (tf.TensorShape([28, 28]), tf.TensorShape([10]))
     ((tf.TensorShape([28, 28, 1]), tf.TensorShape([28, 28, 1])), tf.TensorShape([10]))
 )
-context.add_tag('Test')
 train_dataset = train_dataset.batch(100)
 # val_dataset = train_dataset.batch(10)
 
@@ -71,6 +66,9 @@ model = Model(inputs=[input1, input2], outputs=[output1])
 
 model.summary()
 
+experiment.watch_keras_model(model)
+deepkit_callback = experiment.create_keras_callback()
+
 log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
 # no need to use compile if you have no loss/optimizer/metrics involved here.
@@ -81,5 +79,5 @@ model.compile(optimizer=optimizers.Adam(0.001),
 model.fit(train_dataset.repeat(), epochs=30, steps_per_epoch=500,
           validation_data=train_dataset.repeat(),
           validation_steps=2,
-          callbacks=[tensorboard_callback, deepkit.create_keras_callback(train_dataset.take(1))]
+          callbacks=[tensorboard_callback, deepkit_callback]
           )

@@ -1,21 +1,19 @@
 import sys
 
-import six
-
 import deepkit.globals
 import deepkit.utils
 from deepkit.client import Client
-from deepkit.context import Context, ContextOptions
+from deepkit.experiment import Experiment, ExperimentOptions
 
 
 def log(s):
-    if deepkit.globals.last_context:
-        deepkit.globals.last_context.log(s)
+    if deepkit.globals.last_experiment:
+        deepkit.globals.last_experiment.log(s)
     else:
         deepkit.globals.last_logs.write(s)
 
 
-def context(project=None, account=None) -> Context:
+def experiment(project=None, account=None) -> Experiment:
     """
     :param project: If the current folder is not linked and you don't specify a project here, an error is raised since
                     Deepkit isn't able to know to which project the experiments data should be sent.
@@ -26,15 +24,13 @@ def context(project=None, account=None) -> Context:
     :return:
     """
     """
-    :param options: ContextOptions
-    :return: returns either a new context or the last created one. Never creates multiple context.
+    :param options: ExperimentOptions
+    :return: returns either a new experiemtn or the last created one. Never creates multiple experiments.
     """
-    if deepkit.globals.last_context:
-        return deepkit.globals.last_context
+    if deepkit.globals.last_experiment:
+        return deepkit.globals.last_experiment
 
-    context = Context(ContextOptions(project=project, account=account))
-
-    return context
+    return Experiment(ExperimentOptions(project=project, account=account))
 
 
 if deepkit.utils.in_self_execution():

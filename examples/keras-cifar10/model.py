@@ -8,16 +8,16 @@ import keras
 from keras.datasets import cifar10
 from keras.preprocessing.image import ImageDataGenerator
 from keras.models import Sequential
-from keras.layers import Dense, Dropout, Activation, Flatten
+from keras.layers import Dense, Dropout, Flatten
 from keras.layers import Conv2D, MaxPooling2D
 import os
 
 import deepkit
-deepkit.context()
+experiment = deepkit.experiment()
 
-batch_size = deepkit.intparam('batch_size')
+batch_size = experiment.intconfig('batch_size', 16)
 num_classes = 10
-epochs = deepkit.intparam('epochs')
+epochs = experiment.intconfig('epochs', 20)
 data_augmentation = False
 num_predictions = 20
 
@@ -29,11 +29,11 @@ model_name = 'keras_cifar10_trained_model.h5'
 (x_train, y_train), (x_test, y_test) = cifar10.load_data()
 
 
-x_train = x_train[0:deepkit.intparam('train_samples')]
-y_train = y_train[0:deepkit.intparam('train_samples')]
+x_train = x_train[0:experiment.intconfig('train_samples', 10000)]
+y_train = y_train[0:experiment.intconfig('train_samples', 10000)]
 
-x_test = x_test[0:deepkit.intparam('test_samples')]
-y_test = y_test[0:deepkit.intparam('test_samples')]
+x_test = x_test[0:experiment.intconfig('test_samples', 10000)]
+y_test = y_test[0:experiment.intconfig('test_samples', 10000)]
 
 print('x_train shape:', x_train.shape)
 print(x_train.shape[0], 'train samples')
@@ -55,9 +55,9 @@ model.add(Dense(32, activation='relu'))
 model.add(Dropout(0.5))
 model.add(Dense(num_classes, activation='softmax'))
 
-opt = keras.optimizers.Adadelta(lr=deepkit.floatparam('lr'))
+opt = keras.optimizers.Adadelta(lr=experiment.floatconfig('lr', 0.1))
 
-deepkit_callback = deepkit.create_keras_callback()
+deepkit_callback = experiment.create_keras_callback()
 
 callbacks = [deepkit_callback]
 
@@ -72,6 +72,8 @@ x_train = x_train.astype('float32')
 x_test = x_test.astype('float32')
 x_train /= 255
 x_test /= 255
+
+experiment.watch_keras_model(model)
 
 if not data_augmentation:
     print('Not using data augmentation.')

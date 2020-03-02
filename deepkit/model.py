@@ -2,7 +2,7 @@ import os
 from typing import NamedTuple, Optional, List
 
 
-class ContextOptions(NamedTuple):
+class ExperimentOptions(NamedTuple):
     """
     Per default the account linked to this folder is used (see `deepkit link`), this is on a new system `localhost`. 
     You can overwrite which account is used by specifying the name here (see `deepkit id` for 

@@ -30,10 +30,11 @@ def pil_image_to_jpeg(image):
     image.save(buffer, format="PNG", quality=70)
     return buffer.getvalue()
 
+
 class DebuggerManager:
-    def __init__(self, context):
+    def __init__(self, experiment):
         import deepkit
-        self.context: deepkit.Context = context
+        self.experiment: deepkit.Experiment = experiment
 
         self.live_last_sent = time.time()
         self.x = 0
@@ -56,12 +57,12 @@ class DebuggerManager:
         self.send_data_futures = []
 
     def create_snapshot(self, x, layers):
-        self.context.client.job_action_threadsafe('addSnapshot', [
+        self.experiment.client.job_action_threadsafe('addSnapshot', [
             x,
             time.time(),
             layers,
-            self.context.job_iteration,
-            self.context.job_step,
+            self.experiment.job_iteration,
+            self.experiment.job_step,
         ])
 
     def tick(self):
@@ -70,9 +71,11 @@ class DebuggerManager:
         instance a fetch() call and send that data to the server.
         """
         if self.active_debug_data_for_this_run: return
-        if not self.context.client.is_connected(): return
+        if not self.experiment.client.is_connected(): return
 
-        state = self.context.debugger_controller.state
+        state = self.experiment.debugger_controller.state
+        if not state: return
+
         self.record_needed = state.recording
         fetch_all = False
 
@@ -84,9 +87,10 @@ class DebuggerManager:
 
         if state.recordingMode == 'epoch':
             # if not epoch_end: record_needed = False
-            if self.context.job_iteration == self.record_last_epoch:
+            if self.experiment.job_iteration == self.record_last_epoch:
                 # nothing to do for records
                 self.record_needed = False
+            self.record_last_epoch = self.experiment.job_iteration
 
         self.live_needed = state.live and (time.time() - self.live_last_sent) > 1
         layers = list(state.watchingLayers.keys())
@@ -126,7 +130,7 @@ class DebuggerManager:
                 output_image = base64.b64encode(pil_image_to_jpeg(fetch.output)).decode()
 
             if self.record_needed:
-                self.send_data_futures.append(self.context.client.job_action_threadsafe('setSnapshotLayerData', [
+                self.send_data_futures.append(self.experiment.client.job_action_threadsafe('setSnapshotLayerData', [
                     fetch_config.x,
                     self.live_needed,
                     fetch.name,
@@ -137,7 +141,7 @@ class DebuggerManager:
                     base64.b64encode(fetch.bhistogram).decode() if fetch.bhistogram else None,
                 ]))
             else:
-                self.send_data_futures.append(self.context.client.job_action_threadsafe('addLiveLayerData', [
+                self.send_data_futures.append(self.experiment.client.job_action_threadsafe('addLiveLayerData', [
                     fetch.name,
                     output,
                     output_image,

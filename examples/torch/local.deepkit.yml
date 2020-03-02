@@ -1,0 +1,12 @@
+config:
+  batch_size: 32
+
+ignore:
+  - data
+  - checkpoint
+  - runs
+
+env:
+  - PYTHONPATH=/Users/marc/bude/deepkit-python-sdk/
+
+command: /usr/local/Cellar/python/3.7.6_1/bin/python3 train.py

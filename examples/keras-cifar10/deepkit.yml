@@ -1,5 +1,8 @@
-label: TF1 Keras Cifar10 Partial
-image: tensorflow/tensorflow:latest-gpu-py3
+title: TF1 Keras Cifar10 Partial
+list: keras-cifar10
+label: 'keras'
+
+image: tensorflow/tensorflow:1.15.2-gpu-py3
 build:
     - pip install -e /deepkit-sdk/
     - pip install --upgrade pip
@@ -11,13 +14,12 @@ build_files:
     - ../../setup.py:/deepkit-sdk/setup.py
 
 ignore:
-    - '**/__pycache__/**'
     - 'report.*'
-    - '**/logs/**'
+    - saved_models
 
-docker:
-    env:
-        - PYTHONPATH=/deepkit-sdk
+#docker:
+#    env:
+#        - PYTHONPATH=/deepkit-sdk
 
 output: saved_models
 
@@ -25,12 +27,11 @@ resources:
     minCpu: 2
     minMemory: 2
 
-parameters:
+config:
     lr: 0.8
     batch_size: 128
     epochs: 15
     train_samples: 60000
     test_samples: 10000
 
-#command: ls -al && python model.py
-command: python test.py
+command: python model.py

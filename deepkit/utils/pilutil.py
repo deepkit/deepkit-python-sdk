@@ -248,7 +248,6 @@ def toimage(arr, high=255, low=0, cmin=None, cmax=None, pal=None,
     return image
 
 
-
 def imresize(arr, size, interp='bilinear', mode=None):
     """
     Resize an image.

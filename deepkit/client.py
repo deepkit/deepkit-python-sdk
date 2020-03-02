@@ -7,13 +7,14 @@ import threading
 from asyncio import Future
 from datetime import datetime
 from typing import Dict, List, Optional
+import numpy as np
 
 import websockets
 from rx.subject import BehaviorSubject
 
 import deepkit.globals
 from deepkit.home import get_home_config
-from deepkit.model import ContextOptions, FolderLink
+from deepkit.model import ExperimentOptions, FolderLink
 
 
 def is_in_directory(filepath, directory):
@@ -24,14 +25,26 @@ class ApiError(Exception):
     pass
 
 
+def json_converter(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, datetime.datetime):
+        return obj.__str__()
+
+
 class Client(threading.Thread):
     connection: websockets.WebSocketClientProtocol
 
-    def __init__(self, options: ContextOptions):
+    def __init__(self, options: ExperimentOptions):
         self.connected = BehaviorSubject(False)
-        self.options: ContextOptions = options
+        self.options: ExperimentOptions = options
 
         self.host = os.environ.get('DEEPKIT_HOST', '127.0.0.1')
+        self.socket_path = os.environ.get('DEEPKIT_SOCKET', None)
         self.ssl = os.environ.get('DEEPKIT_SSL', '0') is '1'
         self.port = int(os.environ.get('DEEPKIT_PORT', '8960'))
         self.token = os.environ.get('DEEPKIT_JOB_ACCESSTOKEN', None)
@@ -295,7 +308,12 @@ class Client(threading.Thread):
             try:
                 q = self.queue[:]
                 for m in q:
-                    await connection.send(json.dumps(m))
+                    try:
+                        j = json.dumps(m, default=json_converter)
+                    except TypeError as e:
+                        print('Could not send message since JSON error', e, m)
+                        continue
+                    await connection.send(j)
                     self.queue.remove(m)
             except Exception as e:
                 print("Failed sending, exit send_messages")
@@ -358,10 +376,17 @@ class Client(threading.Thread):
 
     async def _connect_job(self, id: str, token: str):
         try:
-            ws = 'wss' if self.ssl else 'ws'
-            self.connection = await websockets.connect(f"{ws}://{self.host}:{self.port}")
-        except Exception:
+            if self.socket_path:
+                print('Deepkit connect job', self.socket_path)
+                self.connection = await websockets.unix_connect(self.socket_path)
+            else:
+                ws = 'wss' if self.ssl else 'ws'
+                url = f"{ws}://{self.host}:{self.port}"
+                print('Deepkit connect job', url)
+                self.connection = await websockets.connect(url)
+        except Exception as e:
             # try again later
+            print('Unable to connect', e)
             await asyncio.sleep(1)
             self.loop.create_task(self._connect())
             return
@@ -421,7 +446,9 @@ class Client(threading.Thread):
             ws = 'wss' if account_config.ssl else 'ws'
 
             try:
-                self.connection = await websockets.connect(f"{ws}://{self.host}:{self.port}")
+                url = f"{ws}://{self.host}:{self.port}"
+                print('Deepkit connect', url)
+                self.connection = await websockets.connect(url)
             except Exception as e:
                 self.offline = True
                 print(f"Deepkit: App not started or server not reachable. Monitoring disabled. {e}")
@@ -444,7 +471,7 @@ class Client(threading.Thread):
                 projectId = link.projectId
             else:
                 if not self.options.project:
-                    raise Exception('No project defined. Please use ContextOptions(project="project-name") '
+                    raise Exception('No project defined. Please use project="project-name"'
                                     'to specify which project to use.')
 
                 project = await self._action('app', 'getProjectForPublicName', [self.options.project], lock=False)
