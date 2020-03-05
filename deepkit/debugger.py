@@ -1,9 +1,10 @@
 import base64
-import io
 import time
 from typing import NamedTuple, List, Dict
 
 import PIL.Image
+
+from deepkit.utils.image import pil_image_to_jpeg
 
 
 class DebuggerFetchItem(NamedTuple):
@@ -22,13 +23,6 @@ class DebuggerFetchConfig(NamedTuple):
     def needs_fetch(self, name: str) -> bool:
         if self.all: return True
         return name in self.layers
-
-
-def pil_image_to_jpeg(image):
-    buffer = io.BytesIO()
-
-    image.save(buffer, format="PNG", quality=70)
-    return buffer.getvalue()
 
 
 class DebuggerManager:

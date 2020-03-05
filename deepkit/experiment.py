@@ -5,27 +5,31 @@ import json
 import os
 import signal
 import struct
+import sys
 import time
+from datetime import datetime
 from threading import Lock
 from typing import Optional, Callable, NamedTuple, Dict, List
 
+import PIL.Image
 import numpy as np
 import psutil
 import typedload
 from rx import interval
 
-import deepkit.debugger
 import deepkit.client
+import deepkit.debugger
 import deepkit.globals
 import deepkit.utils
 from deepkit.model import ExperimentOptions
+from deepkit.utils.image import pil_image_to_jpeg, get_layer_vis_square, get_image_tales, make_image_from_dense
+from deepkit.utils import numpy_to_binary
 
 
 def get_job_config():
     if deepkit.globals.loaded_job_config is None:
-        if 'DEEPKIT_TASK_CONFIG' in os.environ:
-            print('DEEPKIT_JOB_CONFIG', os.environ['DEEPKIT_JOB_CONFIG'])
-            deepkit.globals.loaded_job_config = json.loads(os.environ['DEEPKIT_TASK_CONFIG'])
+        if 'DEEPKIT_JOB_CONFIG' in os.environ:
+            deepkit.globals.loaded_job_config = json.loads(os.environ['DEEPKIT_JOB_CONFIG'])
         else:
             deepkit.globals.loaded_job_config = {
             }
@@ -108,6 +112,8 @@ class Experiment:
         self.model_watching = dict()
 
         self.auto_x_of_metrix = dict()
+        self.auto_x_of_insight = dict()
+        self.created_insights = dict()
 
         self.seconds_per_iteration = 0
         self.seconds_per_iterations = []
@@ -340,8 +346,9 @@ class Experiment:
     def set_description(self, description: any):
         self.client.patch('description', description)
 
-    def add_label(self, label_name: str):
-        self.client.job_action_threadsafe('addLabel', [label_name])
+    def add_label(self, *label_name: str):
+        for name in label_name:
+            self.client.job_action_threadsafe('addLabel', [name])
 
     def remove_label(self, label_name: str):
         self.client.job_action_threadsafe('removeLabel', [label_name])
@@ -365,8 +372,12 @@ class Experiment:
         return Controller()
 
     def add_file(self, path: str):
+        relative_path = os.path.relpath(path, os.getcwd())
+        if '..' in relative_path:
+            relative_path = '__parent/' + relative_path.replace('..', '__')
+
         self.client.job_action_threadsafe('uploadFile',
-                                          [path, base64.b64encode(open(path, 'rb').read()).decode('utf8')])
+                                          [relative_path, base64.b64encode(open(path, 'rb').read()).decode('utf8')])
 
     def add_file_content(self, path: str, content: bytes):
         self.client.job_action_threadsafe('uploadFile', [path, base64.b64encode(content).decode('utf8')])
@@ -402,7 +413,7 @@ class Experiment:
         if model in self.model_watching: return
         self.model_watching[model] = True
 
-        from deepkit.tf import TFDebugger, extract_model_graph
+        from deepkit.keras_tf import TFDebugger, extract_model_graph
         name = name if name else model.name
 
         graph, record_map, input_names = extract_model_graph(model)
@@ -505,6 +516,100 @@ class Experiment:
 
         self.client.job_action_threadsafe('setModelGraph', [graph, name])
         return graph, record_map, input_names, output_names
+
+    def add_insight(self, *datas, name: str = None, x=None, image_convertion=True, meta=None):
+        if x is None:
+            if self.job_steps > 0:
+                x = self.job_iteration + (self.job_step / self.job_steps)
+            elif self.job_iteration > 0:
+                x = self.job_iteration
+            else:
+                if name not in self.auto_x_of_insight:
+                    self.auto_x_of_insight[name] = 0
+                self.auto_x_of_insight[name] += 1
+                x = self.auto_x_of_insight[name]
+
+        if not isinstance(x, (int, float)):
+            raise Exception('x needs to be integer or float')
+
+        if x not in self.created_insights:
+            self.created_insights[x] = True
+            self.client.job_action_threadsafe('addInsight', [
+                x,
+                time.time(),
+                self.job_iteration,
+                self.job_step,
+            ])
+
+        for i, data in enumerate(datas):
+            file_type = ''
+            if isinstance(data, PIL.Image.Image):
+                file_type = 'png'
+                data = pil_image_to_jpeg(data)
+            elif isinstance(data, np.ndarray):
+                # tf is not batch per default
+
+                if image_convertion:
+                    sample = np.copy(data)
+                    shape = data.shape
+                    image = False
+                    if len(shape) == 3:
+                        try:
+                            if 'keras' in sys.modules:
+                                import keras
+                                if keras.backend.image_data_format() == 'channels_last':
+                                    sample = np.transpose(sample, (2, 0, 1))
+                            elif 'tensorflow.keras' in sys.modules:
+                                import tensorflow.keras as keras
+                                if keras.backend.image_data_format() == 'channels_last':
+                                    sample = np.transpose(sample, (2, 0, 1))
+                        except:
+                            pass
+
+                        if sample.shape[0] == 3:
+                            data = PIL.Image.fromarray(get_layer_vis_square(sample))
+                            image = True
+                        else:
+                            data = PIL.Image.fromarray(get_image_tales(sample))
+                            image = True
+                    elif len(shape) > 1:
+                        data = PIL.Image.fromarray(get_layer_vis_square(sample))
+                        image = True
+                    elif len(shape) == 1:
+                        if shape[0] != 1:
+                            # we got a single number
+                            data = sample[0]
+                        else:
+                            data = make_image_from_dense(sample)
+                            image = True
+                    if image:
+                        file_type = 'png'
+                        data = pil_image_to_jpeg(data)
+                    else:
+                        file_type = 'npy'
+                        data = numpy_to_binary(data)
+                else:
+                    file_type = 'npy'
+                    data = numpy_to_binary(data)
+            else:
+                file_type = 'json'
+                data = bytes(json.dumps(data), encoding='utf-8')
+
+            if len(datas) > 1:
+                file_name = name + '_' + str(i) + '.' + file_type
+            else:
+                file_name = name + '.' + file_type
+
+            self.client.job_action_threadsafe('addInsightEntry', [
+                x,
+                file_name,
+                datetime.now().isoformat(),
+                {
+                    'type': file_type,
+                    'meta': meta
+                },
+                base64.b64encode(data).decode(),
+            ])
 
     def metric(self, name: str, *y, x=None):
         if y is None:

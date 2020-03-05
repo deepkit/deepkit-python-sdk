@@ -139,8 +139,14 @@ def extract_model_graph(model):
     scope_nodes = dict()
     input_names = []
     output_names = []
+    record_map = dict()
 
     output_tensor = model.outputs[0] if hasattr(model, 'outputs') else model.output
+    if not hasattr(output_tensor, 'graph'):
+        # only tensorflow has `graph` defined.
+        graph = {'nodes': [], 'scopes': []}
+        return graph, record_map, input_names
+
     g = output_tensor.graph
     tf_nodes = list(g.as_graph_def(add_shapes=True).node)
     blacklist = {'Placeholder', 'PlaceholderWithDefault', 'Const'}
@@ -234,13 +240,14 @@ def extract_model_graph(model):
 
     dk_nodes = []
     dk_scopes = []
-    record_map = dict()
 
     primitive = {'Identity'}
 
     # shows those layers activation nodes.
     activations = {'elu', 'softmax', 'selu', 'softplus', 'softsign', 'relu', 'tanh', 'sigmoid', 'hard_sigmoid',
                    'exponential', 'linear', 'leakyrelu'}
+
+    op_names_normalization = {'AddV2': 'add'}
 
     # show as type 'layer' when no `activation` or linear activation has been set. This
     # hides internals of those layers in the graph.
@@ -272,7 +279,6 @@ def extract_model_graph(model):
         scope_id = names_to_scope[name]
         node_label = name
         node_type = 'op'
-        node = nodes[name]
         node_sub_type: str = nodes[name].op
         inputs = edges[name] if name in edges else []
         recordable = True
@@ -293,6 +299,9 @@ def extract_model_graph(model):
 
         if node_sub_type.lower() in activations:
             node_type = 'activation'
+
+        if node_sub_type in op_names_normalization:
+            node_sub_type = op_names_normalization[node_sub_type]
 
         if recordable:
             # map names to tensor, which can be later used to fetch the output

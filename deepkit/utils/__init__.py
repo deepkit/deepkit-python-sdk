@@ -1,3 +1,4 @@
+import io
 import os
 
 import numpy as np
@@ -33,6 +34,15 @@ def array_to_img(x, scale=True):
         return Image.fromarray(x.reshape(x.shape[1], x.shape[2]), 'L')
     else:
         raise Exception('Unsupported channel number: ', x.shape[0])
+
+
+def numpy_to_binary(array):
+    buffer = io.BytesIO()
+
+    if isinstance(array, np.ndarray):
+        np.save(buffer, array)
+
+    return buffer.getvalue()
 
 
 def get_parameter_by_path(dictionary, path):

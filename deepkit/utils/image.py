@@ -4,6 +4,7 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
+import io
 import math
 
 from six.moves import range
@@ -38,6 +39,13 @@ import PIL.Image
 # List of supported file extensions
 # Use like "if filename.endswith(SUPPORTED_EXTENSIONS)"
 SUPPORTED_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.ppm')
+
+
+def pil_image_to_jpeg(image):
+    buffer = io.BytesIO()
+
+    image.save(buffer, format="PNG", quality=70)
+    return buffer.getvalue()
 
 
 def make_image_from_dense(neurons):

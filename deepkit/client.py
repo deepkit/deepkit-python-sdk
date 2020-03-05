@@ -91,15 +91,15 @@ class Client(threading.Thread):
         # failed = 250, //when at least one task failed
         # crashed = 300, //when at least one task crashed
         self.patches['status'] = 150
-        self.patches['ended'] = datetime.utcnow().isoformat()
-        self.patches['tasks.main.ended'] = datetime.utcnow().isoformat()
+        self.patches['ended'] = datetime.now().isoformat()
+        self.patches['tasks.main.ended'] = datetime.now().isoformat()
 
         # done = 500,
         # aborted = 550,
         # failed = 600,
         # crashed = 650,
         self.patches['tasks.main.status'] = 500
-        self.patches['tasks.main.instances.0.ended'] = datetime.utcnow().isoformat()
+        self.patches['tasks.main.instances.0.ended'] = datetime.now().isoformat()
 
         # done = 500,
         # aborted = 550,
@@ -377,12 +377,10 @@ class Client(threading.Thread):
     async def _connect_job(self, id: str, token: str):
         try:
             if self.socket_path:
-                print('Deepkit connect job', self.socket_path)
                 self.connection = await websockets.unix_connect(self.socket_path)
             else:
                 ws = 'wss' if self.ssl else 'ws'
                 url = f"{ws}://{self.host}:{self.port}"
-                print('Deepkit connect job', url)
                 self.connection = await websockets.connect(url)
         except Exception as e:
             # try again later
@@ -447,7 +445,6 @@ class Client(threading.Thread):
 
             try:
                 url = f"{ws}://{self.host}:{self.port}"
-                print('Deepkit connect', url)
                 self.connection = await websockets.connect(url)
             except Exception as e:
                 self.offline = True
@@ -484,7 +481,7 @@ class Client(threading.Thread):
             job = await self._action('app', 'createJob', [projectId],
                                      lock=False)
 
-            deepkit.globals.loaded_job_config = job
+            deepkit.globals.loaded_job_config = job['config']['config']
             self.token = await self._action('app', 'getJobAccessToken', [job['id']], lock=False)
             self.job_id = job['id']
 

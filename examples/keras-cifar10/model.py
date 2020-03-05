@@ -2,25 +2,29 @@
 It gets to 75% validation accuracy in 25 epochs, and 79% after 50 epochs.
 (it's still underfitting at that point, though).
 '''
+import os
 
-from __future__ import print_function
+# os.environ["KERAS_BACKEND"] = "plaidml.keras.backend"
+# os.environ["RUNFILES_DIR"] = "/usr/local/share/plaidml"
+# os.environ["PLAIDML_NATIVE_PATH"] = "/usr/local/lib/libplaidml.dylib"
+
 import keras
 from keras.datasets import cifar10
 from keras.preprocessing.image import ImageDataGenerator
 from keras.models import Sequential
 from keras.layers import Dense, Dropout, Flatten
 from keras.layers import Conv2D, MaxPooling2D
-import os
 
 import deepkit
+
 experiment = deepkit.experiment()
+experiment.add_file(__file__)
 
 batch_size = experiment.intconfig('batch_size', 16)
 num_classes = 10
-epochs = experiment.intconfig('epochs', 20)
+epochs = experiment.intconfig('epochs', 15)
 data_augmentation = False
 num_predictions = 20
-
 
 save_dir = os.path.join(os.getcwd(), 'saved_models')
 model_name = 'keras_cifar10_trained_model.h5'
@@ -28,6 +32,7 @@ model_name = 'keras_cifar10_trained_model.h5'
 # The data, split between train and test sets:
 (x_train, y_train), (x_test, y_test) = cifar10.load_data()
 
+labels = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
 
 x_train = x_train[0:experiment.intconfig('train_samples', 10000)]
 y_train = y_train[0:experiment.intconfig('train_samples', 10000)]
@@ -35,8 +40,29 @@ y_train = y_train[0:experiment.intconfig('train_samples', 10000)]
 x_test = x_test[0:experiment.intconfig('test_samples', 10000)]
 y_test = y_test[0:experiment.intconfig('test_samples', 10000)]
 
+experiment.add_insight(*x_train[0:50], name='samples/train/sample')
+
+for i, x in enumerate(x_test[0:20]):
+    experiment.add_insight(x, name='samples/test/sample_' + str(i), meta=labels[y_test[i][0]])
+
+experiment.add_insight({'my-data': 123, 'more': True}, name='json-like/sample1')
+experiment.add_insight({'my-data': 234, 'more': False}, name='json-like/sample2')
+experiment.add_insight(12312312.333, name='json-like/sample3')
+experiment.add_insight("This is just text\nYay.", name='json-like/sample4')
+experiment.add_insight(
+    "Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's "
+    "standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make "
+    "a type specimen book. It has survived not only five centuries.",
+    name='json-like/sample5')
+experiment.add_insight(x_test[0], name='numpy-shizzle/sample1', image_convertion=False)
+experiment.add_insight(x_test[1], name='numpy-shizzle/sample2', image_convertion=False)
+experiment.add_insight(x_test[2], name='numpy-shizzle/sample3', image_convertion=False)
+experiment.add_insight(x_test[3], name='numpy-shizzle/sample4', image_convertion=False)
+experiment.add_insight(y_test[0:50], name='numpy-shizzle/y_test', image_convertion=False)
+
 print('x_train shape:', x_train.shape)
 print(x_train.shape[0], 'train samples')
+print(x_test.shape[0], 'test samples')
 print(x_test.shape[0], 'test samples')
 
 # Convert class vectors to binary class matrices.

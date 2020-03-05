@@ -72,6 +72,7 @@ class KerasCallback(keras.callbacks.Callback):
 
         self.experiment.set_info('parameters', get_total_params(self.model))
         self.experiment.set_info('keras.image_data_format', keras.backend.image_data_format())
+        self.experiment.set_info('keras.backend', keras.backend.backend())
 
         # self.job_backend.upload_keras_graph(self.model)
 
@@ -143,8 +144,14 @@ class KerasCallback(keras.callbacks.Callback):
         self.send_optimizer_info(log['epoch'])
 
     def send_metrics(self, log, x):
-        accuracy_log_name = 'accuracy'
-        val_accuracy_log_name = 'val_accuracy'
+        if 'acc' in log:
+            # tf 1
+            accuracy_log_name = 'acc'
+            val_accuracy_log_name = 'val_acc'
+        else:
+            # tf2
+            accuracy_log_name = 'accuracy'
+            val_accuracy_log_name = 'val_accuracy'
 
         total_accuracy_validation = log.get(val_accuracy_log_name, None)
         total_accuracy_training = log.get(accuracy_log_name, None)
@@ -183,8 +190,15 @@ class KerasCallback(keras.callbacks.Callback):
             config = self.model.optimizer.get_config()
 
             if 'lr' in config and 'decay' in config and hasattr(self.model.optimizer, 'iterations'):
-                return config['lr'] * (
-                        1. / (1. + config['decay'] * float(self.model.optimizer.iterations)))
+                iterations = self.model.optimizer.iterations
+                # if hasattr(iterations, 'var') and hasattr(iterations.var, 'as_ndarray'):
+                #     # plaidML
+                #     ndarray = iterations.var.as_ndarray(None)
+                #     iterations = float(ndarray)
+                # else:
+                iterations = float(keras.backend.get_value(iterations))
+
+                return config['lr'] * (1. / (1. + config['decay'] * iterations))
 
             elif 'lr' in config:
                 return config['lr']
