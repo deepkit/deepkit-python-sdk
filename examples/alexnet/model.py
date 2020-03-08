@@ -9,7 +9,7 @@ from keras.utils import np_utils
 import numpy as np
 import deepkit
 
-deepkit.context()
+experiment = deepkit.experiment()
 
 batch_size = 64
 nb_classes = 1000
@@ -63,4 +63,4 @@ model.compile(loss='categorical_crossentropy',
               optimizer='rmsprop',
               metrics=['accuracy'])
 
-model.fit_generator(gen(), epochs=100, steps_per_epoch=200, callbacks=[deepkit.create_keras_callback(next(gen())[0])])
+model.fit_generator(gen(), epochs=100, steps_per_epoch=200, callbacks=[experiment.create_keras_callback(next(gen())[0])])

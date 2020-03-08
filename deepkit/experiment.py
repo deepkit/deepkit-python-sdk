@@ -367,23 +367,44 @@ class Experiment:
 
         class Controller:
             def send(self, *y, x=None):
-                that.metric(name, *y, x=x)
+                that.log_metric(name, *y, x=x)
 
         return Controller()
 
-    def add_file(self, path: str):
+    def add_output_file(self, path: str):
+        self.add_file(path, as_output=True)
+
+    def add_output_content(self, path: str, content):
+        self.add_file_content(path, content, as_output=True)
+
+    def add_file(self, path: str, as_output=False):
         relative_path = os.path.relpath(path, os.getcwd())
+        if 'DEEPKIT_ROOT_DIR' in os.environ:
+            relative_path = os.path.relpath(path, os.environ['DEEPKIT_ROOT_DIR'])
+
         if '..' in relative_path:
             relative_path = '__parent/' + relative_path.replace('..', '__')
 
-        self.client.job_action_threadsafe('uploadFile',
-                                          [relative_path, base64.b64encode(open(path, 'rb').read()).decode('utf8')])
+        self.add_file_content(relative_path, open(path, 'rb').read(), as_output=as_output)
 
-    def add_file_content(self, path: str, content: bytes):
-        self.client.job_action_threadsafe('uploadFile', [path, base64.b64encode(content).decode('utf8')])
+    def add_file_content(self, path: str, content, as_output=False):
+        if isinstance(content, (dict, list, tuple)):
+            content = json.dumps(content)
+
+        if isinstance(content, str):
+            content = bytes(content, encoding='utf-8')
+
+        if not isinstance(content, bytes):
+            raise Exception('Data type is not supported. Please provide str, bytes, or dict/list/tuple.')
+
+        method = 'uploadOutputFile' if as_output else 'uploadFile'
+        self.client.job_action_threadsafe(method, [path, base64.b64encode(content).decode('utf8')])
 
     def set_list(self, name: str):
         self.client.job_action_threadsafe('setList', [name])
+
+    def full_config(self):
+        return get_job_config()
 
     def get_config(self, path, default=None):
         res = deepkit.utils.get_parameter_by_path(get_job_config(), path)
@@ -517,7 +538,7 @@ class Experiment:
         self.client.job_action_threadsafe('setModelGraph', [graph, name])
         return graph, record_map, input_names, output_names
 
-    def add_insight(self, *datas, name: str = None, x=None, image_convertion=True, meta=None):
+    def log_insight(self, *data, name: str, x=None, image_convertion=True, meta=None):
         if x is None:
             if self.job_steps > 0:
                 x = self.job_iteration + (self.job_step / self.job_steps)
@@ -541,17 +562,17 @@ class Experiment:
                 self.job_step,
             ])
 
-        for i, data in enumerate(datas):
+        for i, d in enumerate(data):
             file_type = ''
-            if isinstance(data, PIL.Image.Image):
+            if isinstance(d, PIL.Image.Image):
                 file_type = 'png'
-                data = pil_image_to_jpeg(data)
-            elif isinstance(data, np.ndarray):
+                d = pil_image_to_jpeg(d)
+            elif isinstance(d, np.ndarray):
                 # tf is not batch per default
 
                 if image_convertion:
-                    sample = np.copy(data)
-                    shape = data.shape
+                    sample = np.copy(d)
+                    shape = d.shape
                     image = False
                     if len(shape) == 3:
                         try:
@@ -567,35 +588,35 @@ class Experiment:
                             pass
 
                         if sample.shape[0] == 3:
-                            data = PIL.Image.fromarray(get_layer_vis_square(sample))
+                            d = PIL.Image.fromarray(get_layer_vis_square(sample))
                             image = True
                         else:
-                            data = PIL.Image.fromarray(get_image_tales(sample))
+                            d = PIL.Image.fromarray(get_image_tales(sample))
                             image = True
                     elif len(shape) > 1:
-                        data = PIL.Image.fromarray(get_layer_vis_square(sample))
+                        d = PIL.Image.fromarray(get_layer_vis_square(sample))
                         image = True
                     elif len(shape) == 1:
                         if shape[0] != 1:
                             # we got a single number
-                            data = sample[0]
+                            d = sample[0]
                         else:
-                            data = make_image_from_dense(sample)
+                            d = make_image_from_dense(sample)
                             image = True
                     if image:
                         file_type = 'png'
-                        data = pil_image_to_jpeg(data)
+                        d = pil_image_to_jpeg(d)
                     else:
                         file_type = 'npy'
-                        data = numpy_to_binary(data)
+                        d = numpy_to_binary(d)
                 else:
                     file_type = 'npy'
-                    data = numpy_to_binary(data)
+                    d = numpy_to_binary(d)
             else:
                 file_type = 'json'
-                data = bytes(json.dumps(data), encoding='utf-8')
+                d = bytes(json.dumps(d), encoding='utf-8')
 
-            if len(datas) > 1:
+            if len(data) > 1:
                 file_name = name + '_' + str(i) + '.' + file_type
             else:
                 file_name = name + '.' + file_type
@@ -608,10 +629,10 @@ class Experiment:
                     'type': file_type,
                     'meta': meta
                 },
-                base64.b64encode(data).decode(),
+                base64.b64encode(d).decode(),
             ])
 
-    def metric(self, name: str, *y, x=None):
+    def log_metric(self, name: str, *y, x=None):
         if y is None:
             y = 0
 
@@ -647,9 +668,11 @@ class Experiment:
         self.metric_buffer.append({'id': name, 'row': row_binary})
         self.drain_metric_buffer()
 
-    def create_keras_callback(self, debug_x=None):
+    def create_keras_callback(self, model=None, debug_model_input=None):
         from .deepkit_keras import KerasCallback
-        callback = KerasCallback(debug_x)
+        callback = KerasCallback(debug_model_input)
+        if model:
+            self.watch_keras_model(model)
 
         return callback
 

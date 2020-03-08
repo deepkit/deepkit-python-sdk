@@ -44,12 +44,12 @@ def get_total_params(model):
 
 
 class KerasCallback(keras.callbacks.Callback):
-    def __init__(self, debug_x=None):
+    def __init__(self, debug_model_input=None):
         super(KerasCallback, self).__init__()
 
         self.experiment = deepkit.experiment()
 
-        self.debug_x = debug_x
+        self.debug_model_input = debug_model_input
 
         self.data_validation = None
         self.data_validation_size = None
@@ -64,7 +64,7 @@ class KerasCallback(keras.callbacks.Callback):
 
     def set_model(self, model):
         super().set_model(model)
-        self.experiment.watch_keras_model(model, self.debug_x)
+        self.experiment.watch_keras_model(model, self.debug_model_input)
 
     def on_train_begin(self, logs={}):
         self.start_time = time.time()

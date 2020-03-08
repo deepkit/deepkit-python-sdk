@@ -1,9 +1,8 @@
 label: Generic data generation
 image: tensorflow/tensorflow:1.15.2-gpu-py3
 build:
+    - ADD ../../deepkit:/deepkit-sdk/deepkit
+    - ADD ../../setup.py:/deepkit-sdk/setup.py
     - pip install -e /deepkit-sdk/
-build_files:
-    - ../../deepkit:/deepkit-sdk/deepkit
-    - ../../setup.py:/deepkit-sdk/setup.py
 
 command: python train.py

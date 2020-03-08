@@ -40,25 +40,25 @@ y_train = y_train[0:experiment.intconfig('train_samples', 10000)]
 x_test = x_test[0:experiment.intconfig('test_samples', 10000)]
 y_test = y_test[0:experiment.intconfig('test_samples', 10000)]
 
-experiment.add_insight(*x_train[0:50], name='samples/train/sample')
+experiment.log_insight(*x_train[0:50], name='samples/train/sample')
 
 for i, x in enumerate(x_test[0:20]):
-    experiment.add_insight(x, name='samples/test/sample_' + str(i), meta=labels[y_test[i][0]])
+    experiment.log_insight(x, name='samples/test/sample_' + str(i), meta=labels[y_test[i][0]])
 
-experiment.add_insight({'my-data': 123, 'more': True}, name='json-like/sample1')
-experiment.add_insight({'my-data': 234, 'more': False}, name='json-like/sample2')
-experiment.add_insight(12312312.333, name='json-like/sample3')
-experiment.add_insight("This is just text\nYay.", name='json-like/sample4')
-experiment.add_insight(
+experiment.log_insight({'my-data': 123, 'more': True}, name='json-like/sample1')
+experiment.log_insight({'my-data': 234, 'more': False}, name='json-like/sample2')
+experiment.log_insight(12312312.333, name='json-like/sample3')
+experiment.log_insight("This is just text\nYay.", name='json-like/sample4')
+experiment.log_insight(
     "Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's "
     "standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make "
     "a type specimen book. It has survived not only five centuries.",
     name='json-like/sample5')
-experiment.add_insight(x_test[0], name='numpy-shizzle/sample1', image_convertion=False)
-experiment.add_insight(x_test[1], name='numpy-shizzle/sample2', image_convertion=False)
-experiment.add_insight(x_test[2], name='numpy-shizzle/sample3', image_convertion=False)
-experiment.add_insight(x_test[3], name='numpy-shizzle/sample4', image_convertion=False)
-experiment.add_insight(y_test[0:50], name='numpy-shizzle/y_test', image_convertion=False)
+experiment.log_insight(x_test[0], name='numpy-shizzle/sample1', image_convertion=False)
+experiment.log_insight(x_test[1], name='numpy-shizzle/sample2', image_convertion=False)
+experiment.log_insight(x_test[2], name='numpy-shizzle/sample3', image_convertion=False)
+experiment.log_insight(x_test[3], name='numpy-shizzle/sample4', image_convertion=False)
+experiment.log_insight(y_test[0:50], name='numpy-shizzle/y_test', image_convertion=False)
 
 print('x_train shape:', x_train.shape)
 print(x_train.shape[0], 'train samples')
@@ -83,7 +83,7 @@ model.add(Dense(num_classes, activation='softmax'))
 
 opt = keras.optimizers.Adadelta(lr=experiment.floatconfig('lr', 0.1))
 
-deepkit_callback = experiment.create_keras_callback()
+deepkit_callback = experiment.create_keras_callback(model)
 
 callbacks = [deepkit_callback]
 
@@ -98,8 +98,6 @@ x_train = x_train.astype('float32')
 x_test = x_test.astype('float32')
 x_train /= 255
 x_test /= 255
-
-experiment.watch_keras_model(model)
 
 if not data_augmentation:
     print('Not using data augmentation.')

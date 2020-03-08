@@ -97,8 +97,8 @@ def train(epoch):
         correct += predicted.eq(targets).sum().item()
 
         experiment.batch(batch_idx, total_batches, targets.size(0))
-        experiment.metric('loss/train', epoch + (batch_idx / total_batches), (train_loss / (batch_idx + 1)))
-        experiment.metric('accuracy/train', epoch + (batch_idx / total_batches), correct / total)
+        experiment.log_metric('loss/train', epoch + (batch_idx / total_batches), (train_loss / (batch_idx + 1)))
+        experiment.log_metric('accuracy/train', epoch + (batch_idx / total_batches), correct / total)
         # progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
         #              % (train_loss / (batch_idx + 1), 100. * correct / total, correct, total))
 
@@ -120,8 +120,8 @@ def test(epoch):
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
 
-            experiment.metric('loss/val', epoch, test_loss / (batch_idx + 1))
-            experiment.metric('accuracy/val', epoch, correct / total)
+            experiment.log_metric('loss/val', epoch, test_loss / (batch_idx + 1))
+            experiment.log_metric('accuracy/val', epoch, correct / total)
             # progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
             #              % (test_loss / (batch_idx + 1), 100. * correct / total, correct, total))
 
