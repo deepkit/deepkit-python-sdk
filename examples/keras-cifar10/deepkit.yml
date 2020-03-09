@@ -21,11 +21,12 @@ output: saved_models
 resources:
     minCpu: 2
     minMemory: 2
+    minGpu: 1
 
 config:
     lr: 0.8
     batch_size: 128
-    epochs: 15
+    epochs: 25
     train_samples: 60000
     test_samples: 10000
 

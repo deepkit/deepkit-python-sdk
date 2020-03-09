@@ -86,36 +86,40 @@ class Client(threading.Thread):
     async def stop_and_sync(self):
         self.stopping = True
 
-        # done = 150, //when all tasks are done
-        # aborted = 200, //when at least one task aborted
-        # failed = 250, //when at least one task failed
-        # crashed = 300, //when at least one task crashed
-        self.patches['status'] = 150
-        self.patches['ended'] = datetime.now().isoformat()
-        self.patches['tasks.main.ended'] = datetime.now().isoformat()
+        if deepkit.utils.in_self_execution():
+            # only when we are in self execution do we set status, time stamps etc
+            # otherwise the CLI is doing that and the server.
 
-        # done = 500,
-        # aborted = 550,
-        # failed = 600,
-        # crashed = 650,
-        self.patches['tasks.main.status'] = 500
-        self.patches['tasks.main.instances.0.ended'] = datetime.now().isoformat()
+            # done = 150, //when all tasks are done
+            # aborted = 200, //when at least one task aborted
+            # failed = 250, //when at least one task failed
+            # crashed = 300, //when at least one task crashed
+            self.patches['status'] = 150
+            self.patches['ended'] = datetime.now().isoformat()
+            self.patches['tasks.main.ended'] = datetime.now().isoformat()
 
-        # done = 500,
-        # aborted = 550,
-        # failed = 600,
-        # crashed = 650,
-        self.patches['tasks.main.instances.0.status'] = 500
+            # done = 500,
+            # aborted = 550,
+            # failed = 600,
+            # crashed = 650,
+            self.patches['tasks.main.status'] = 500
+            self.patches['tasks.main.instances.0.ended'] = datetime.now().isoformat()
 
-        if hasattr(sys, 'last_value'):
-            if isinstance(sys.last_value, KeyboardInterrupt):
-                self.patches['status'] = 200
-                self.patches['tasks.main.status'] = 550
-                self.patches['tasks.main.instances.0.status'] = 550
-            else:
-                self.patches['status'] = 300
-                self.patches['tasks.main.status'] = 650
-                self.patches['tasks.main.instances.0.status'] = 650
+            # done = 500,
+            # aborted = 550,
+            # failed = 600,
+            # crashed = 650,
+            self.patches['tasks.main.instances.0.status'] = 500
+
+            if hasattr(sys, 'last_value'):
+                if isinstance(sys.last_value, KeyboardInterrupt):
+                    self.patches['status'] = 200
+                    self.patches['tasks.main.status'] = 550
+                    self.patches['tasks.main.instances.0.status'] = 550
+                else:
+                    self.patches['status'] = 300
+                    self.patches['tasks.main.status'] = 650
+                    self.patches['tasks.main.instances.0.status'] = 650
 
         while len(self.patches) > 0 or len(self.queue) > 0:
             await asyncio.sleep(0.15)
