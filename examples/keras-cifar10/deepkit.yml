@@ -29,5 +29,6 @@ config:
     epochs: 25
     train_samples: 60000
     test_samples: 10000
+    data_augmentation: false
 
 command: python model.py
