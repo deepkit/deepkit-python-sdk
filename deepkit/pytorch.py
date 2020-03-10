@@ -419,7 +419,7 @@ class TorchDebugger:
         module.register_forward_hook(hook)
 
     def get_histogram(self, x, tensor):
-        h = np.histogram(tensor.detach().numpy(), bins=20)
+        h = np.histogram(tensor.cpu().detach().numpy(), bins=20)
         # <version><x><bins><...x><...y>, little endian
         # uint8|Uint32|Uint16|...Float32|...Uint32
         # B|L|H|...f|...L
@@ -436,7 +436,7 @@ class TorchDebugger:
 
             if len(output.shape) > 1:
                 # outputs come in batch usually, so pick first
-                sample = output[0].detach().numpy()
+                sample = output[0].cpu().detach().numpy()
                 if len(sample.shape) == 3:
                     if sample.shape[0] == 3:
                         image = PIL.Image.fromarray(get_layer_vis_square(sample))

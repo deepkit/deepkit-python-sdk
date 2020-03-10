@@ -424,7 +424,11 @@ class Experiment:
 
     def boolconfig(self, path, default=None):
         v = self.get_config(path, default)
-        return bool(v) if v is not None else default
+        if v is None:
+            return default
+        if not v or v is 'false' or v is 0 or v is '0':
+            return False
+        return True
 
     def config(self, path, default=None):
         v = self.get_config(path, default)
@@ -449,7 +453,7 @@ class Experiment:
 
             def fit_generator(generator, *args, **kwargs):
                 if debugger.model_input is None:
-                    debugger.set_input(generator)
+                    debugger.set_input(next(iter(generator)))
                 return ori_fit_generator(generator, *args, **kwargs)
 
             model.fit_generator = fit_generator

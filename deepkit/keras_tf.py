@@ -6,6 +6,7 @@ from typing import Dict, Optional, List
 
 import PIL.Image
 import numpy as np
+
 if 'keras' in sys.modules:
     import keras
 else:

@@ -157,6 +157,7 @@ else:
     model.fit_generator(datagen.flow(x_train, y_train,
                                      batch_size=batch_size),
                         epochs=epochs,
+                        steps_per_epoch=len(x_train)/batch_size,
                         verbose=0,
                         callbacks=callbacks,
                         validation_data=(x_test, y_test),
