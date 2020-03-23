@@ -7,16 +7,8 @@ from __future__ import print_function
 import io
 import math
 
-from six.moves import range
-
-# Find the best implementation available
 from deepkit.utils import array_to_img
 from deepkit.utils.pilutil import imresize
-
-try:
-    from cStringIO import StringIO
-except ImportError:
-    from io import StringIO
 
 import numpy as np
 import PIL.Image
@@ -230,36 +222,6 @@ def resize_image(image, height, width,
             image = np.concatenate((noise, image, noise), axis=1)
 
         return image
-
-
-def embed_image_html(image):
-    """
-    Returns an image embedded in HTML base64 format
-    (Based on Caffe's web_demo)
-    Arguments:
-    image -- a PIL.Image or np.ndarray
-    """
-    if image is None:
-        return None
-    elif isinstance(image, PIL.Image.Image):
-        pass
-    elif isinstance(image, np.ndarray):
-        image = PIL.Image.fromarray(image)
-    else:
-        raise ValueError('image must be a PIL.Image or a np.ndarray')
-
-    # Read format from the image
-    fmt = image.format
-    if not fmt:
-        # default to JPEG
-        fmt = 'jpeg'
-    else:
-        fmt = fmt.lower()
-
-    string_buf = StringIO()
-    image.save(string_buf, format=fmt)
-    data = string_buf.getvalue().encode('base64').replace('\n', '')
-    return 'data:image/%s;base64,%s' % (fmt, data)
 
 
 def add_bboxes_to_image(image, bboxes, color='red', width=1):
