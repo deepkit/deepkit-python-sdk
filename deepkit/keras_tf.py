@@ -517,14 +517,18 @@ class TFDebugger:
         inputs = self.model.inputs if hasattr(self.model, 'inputs') else self.model.input
 
         fn = keras.backend.function(inputs, outputs)
-        y = fn(self.model_input)
+        try:
+            y = fn(self.model_input)
 
-        result = []
+            result = []
 
-        for i, _ in enumerate(names):
-            result.append(self._image_and_histogram(x, y[i]))
+            for i, _ in enumerate(names):
+                result.append(self._image_and_histogram(x, y[i]))
 
-        return result
+            return result
+        except Exception as e:
+            print(f"Failed to watch tensor. Input shape: {self.model_input.shape}, outputs={len(outputs)}")
+            raise e
 
     def _image_and_histogram(self, x, output):
         image = None

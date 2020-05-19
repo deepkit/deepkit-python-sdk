@@ -45,7 +45,7 @@ train_dataset = train_dataset.batch(100)
 
 # model = tf.keras.Sequential([
 #     resnet,
-#     layers.Dense(10, name='fickficki')
+#     layers.Dense(10, name='asd')
 # ])
 
 input1 = layers.Input((28, 28, 1))

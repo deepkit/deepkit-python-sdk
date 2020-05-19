@@ -1,0 +1,20 @@
+title: Keras TF1 Resnet Cifar10
+label: 'keras'
+
+image: tensorflow/tensorflow:1.15.2-gpu-py3
+build:
+    - pip install --upgrade pip
+    - ADD requirements.txt
+    - pip install -r requirements.txt
+    - python -c 'from keras.datasets import cifar10; cifar10.load_data()'
+    - ADD ../../deepkit:/deepkit-sdk/deepkit
+    - ADD ../../setup.py:/deepkit-sdk/setup.py
+    - pip install -e /deepkit-sdk/
+
+ignore:
+    - report.*
+    - saved_models
+
+output: saved_models
+
+command: python model.py

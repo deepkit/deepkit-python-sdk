@@ -1,8 +1,8 @@
 from __future__ import print_function
 import os
-os.environ["KERAS_BACKEND"] = "plaidml.keras.backend"
-os.environ["RUNFILES_DIR"] = "/usr/local/share/plaidml"
-os.environ["PLAIDML_NATIVE_PATH"] = "/usr/local/lib/libplaidml.dylib"
+#os.environ["KERAS_BACKEND"] = "plaidml.keras.backend"
+#os.environ["RUNFILES_DIR"] = "/usr/local/share/plaidml"
+#os.environ["PLAIDML_NATIVE_PATH"] = "/usr/local/lib/libplaidml.dylib"
 
 import keras
 from keras.layers import Dense, Conv2D, BatchNormalization, Activation
@@ -12,15 +12,12 @@ from keras.callbacks import ModelCheckpoint, LearningRateScheduler
 from keras.callbacks import ReduceLROnPlateau
 from keras.preprocessing.image import ImageDataGenerator
 from keras.regularizers import l2
-from keras import backend as K
 from keras.models import Model
 from keras.datasets import cifar10
 import numpy as np
 import deepkit
 
 experiment = deepkit.experiment()
-experiment.add_file(__file__)
-experiment.add_file('../../setup.py')
 
 experiment.add_label('resnet', 'keras')
 
@@ -359,6 +356,7 @@ lr_reducer = ReduceLROnPlateau(factor=np.sqrt(0.1),
                                patience=5,
                                min_lr=0.5e-6)
 
+experiment.watch_keras_model(model)
 callbacks = [checkpoint, lr_reducer, lr_scheduler, experiment.create_keras_callback()]
 
 # Run training, with or without data augmentation.
