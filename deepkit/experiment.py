@@ -97,6 +97,9 @@ class Experiment:
         self.last_throttle_call = dict()
 
         self.client = deepkit.client.Client(options)
+        if deepkit.globals.last_experiment:
+            deepkit.globals.last_experiment.shutdown()
+
         deepkit.globals.last_experiment = self
         self.log_lock = Lock()
         self.defined_metrics = {}
@@ -139,8 +142,11 @@ class Experiment:
         self.client.connected.subscribe(on_connect)
 
         atexit.register(self.shutdown)
-        self.client.connect()
-        self.wait_for_connect()
+        try:
+            self.client.connect()
+            self.wait_for_connect()
+        except Exception:
+            deepkit.globals.last_experiment = None
 
         if deepkit.utils.in_self_execution():
             # the CLI handles output logging otherwise
@@ -233,6 +239,7 @@ class Experiment:
     def shutdown(self):
         if self.shutting_down: return
         self.shutting_down = True
+        atexit.unregister(self.shutdown)
         self.drain_metric_buffer()
         self.drain_speed_report()
         self.drain_logs()

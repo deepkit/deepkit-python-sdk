@@ -47,8 +47,11 @@ class Client(threading.Thread):
         self.socket_path = os.environ.get('DEEPKIT_SOCKET', None)
         self.ssl = os.environ.get('DEEPKIT_SSL', '0') is '1'
         self.port = int(os.environ.get('DEEPKIT_PORT', '8960'))
-        self.token = os.environ.get('DEEPKIT_JOB_ACCESSTOKEN', None)
+        self.job_token = os.environ.get('DEEPKIT_JOB_ACCESSTOKEN', None)
         self.job_id = os.environ.get('DEEPKIT_JOB_ID', None)
+
+        self.token = os.environ.get('DEEPKIT_ACCESSTOKEN', None)
+
         self.message_id = 0
         self.account = 'localhost'
         self.callbacks: Dict[int, asyncio.Future] = {}
@@ -74,6 +77,9 @@ class Client(threading.Thread):
 
     def connect(self):
         asyncio.run_coroutine_threadsafe(self._connect(), self.loop)
+
+    def connect_anon(self):
+        asyncio.run_coroutine_threadsafe(self._connect_anon(), self.loop).result()
 
     def shutdown(self):
         if self.offline: return
@@ -125,6 +131,9 @@ class Client(threading.Thread):
             await asyncio.sleep(0.15)
 
         await self.connection.close()
+
+        if deepkit.utils.in_self_execution():
+            print("Experiment stopped")
 
     def register_controller(self, name: str, controller):
         return asyncio.run_coroutine_threadsafe(self._register_controller(name, controller), self.loop)
@@ -253,6 +262,10 @@ class Client(threading.Thread):
 
         raise ApiError(f"Invalid action type '{res['type']}'. Not implemented")
 
+    def app_action_threadsafe(self, action: str, args=None) -> Future:
+        if args is None: args = []
+        return asyncio.run_coroutine_threadsafe(self._action('app', action, args), self.loop)
+
     async def job_action(self, action: str, args=None):
         return await self._action('job', action, args)
 
@@ -378,7 +391,7 @@ class Client(threading.Thread):
             self.connected.on_next(False)
             self.loop.create_task(self._connect())
 
-    async def _connect_job(self, id: str, token: str):
+    async def _connected(self, id: str, token: str):
         try:
             if self.socket_path:
                 self.connection = await websockets.unix_connect(self.socket_path)
@@ -397,20 +410,21 @@ class Client(threading.Thread):
         # we don't use send_messages() since this would send all queue/patches
         # which would lead to permission issues when we're not first authenticated
 
-        message = self._create_message({
-            'name': 'authenticate',
-            'token': {
-                'id': 'job',
-                'token': token,
-                'job': id
-            }
-        }, lock=False)
+        if token:
+            message = self._create_message({
+                'name': 'authenticate',
+                'token': {
+                    'id': 'job',
+                    'token': token,
+                    'job': id
+                }
+            }, lock=False)
 
-        await self.connection.send(json.dumps(message))
+            await self.connection.send(json.dumps(message))
 
-        res = await self.callbacks[message['id']]
-        if not res['result'] or res['result'] is not True:
-            raise Exception('Job token invalid')
+            res = await self.callbacks[message['id']]
+            if not res['result'] or res['result'] is not True:
+                raise Exception('Job token invalid')
 
         self.loop.create_task(self.send_messages(self.connection))
 
@@ -421,32 +435,49 @@ class Client(threading.Thread):
         self.connected.on_next(True)
         self.connections += 1
 
+    async def _connect_anon(self):
+        ws = 'wss' if self.ssl else 'ws'
+        url = f"{ws}://{self.host}:{self.port}"
+        self.connection = await websockets.connect(url)
+        self.loop.create_task(self.handle_messages(self.connection))
+        self.loop.create_task(self.send_messages(self.connection))
+
+        self.connecting.set_result(True)
+        self.connected.on_next(True)
+        self.connections += 1
+
     async def _connect(self):
         # we want to restart with a empty queue, so authentication happens always first
         queue_copy = self.queue[:]
         self.queue = []
 
-        if self.token:
-            await self._connect_job(self.job_id, self.token)
+        if self.job_token:
+            await self._connected(self.job_id, self.job_token)
             return
 
         try:
             config = get_home_config()
             link: Optional[FolderLink] = None
-            if self.options.account:
-                account_config = config.get_account_for_name(self.options.account)
-            elif not self.options.project:
-                link = config.get_folder_link_of_directory(sys.path[0])
-                account_config = config.get_account_for_id(link.accountId)
-            else:
-                # default to localhost
-                account_config = config.get_account_for_name('localhost')
 
-            self.host = account_config.host
-            self.port = account_config.port
-            self.ssl = account_config.ssl
-            ws = 'wss' if account_config.ssl else 'ws'
+            user_token = self.token
+            if not user_token:
+                # when no user_token is given (via deepkit.login() for example)
+                # we need to find the host, port, token from the user config in ~/.deepkit/config
+                if self.options.account:
+                    account_config = config.get_account_for_name(self.options.account)
+                elif not self.options.project:
+                    link = config.get_folder_link_of_directory(sys.path[0])
+                    account_config = config.get_account_for_id(link.accountId)
+                else:
+                    # default to localhost
+                    account_config = config.get_account_for_name('localhost')
 
+                self.host = account_config.host
+                self.port = account_config.port
+                self.ssl = account_config.ssl
+                user_token = account_config.token
+
+            ws = 'wss' if self.ssl else 'ws'
             try:
                 url = f"{ws}://{self.host}:{self.port}"
                 self.connection = await websockets.connect(url)
@@ -458,11 +489,12 @@ class Client(threading.Thread):
 
             self.loop.create_task(self.handle_messages(self.connection))
             self.loop.create_task(self.send_messages(self.connection))
+
             res = await self._message({
                 'name': 'authenticate',
                 'token': {
                     'id': 'user',
-                    'token': account_config.token
+                    'token': user_token
                 }
             }, lock=False)
             if not res['result']:
@@ -486,12 +518,12 @@ class Client(threading.Thread):
                                      lock=False)
 
             deepkit.globals.loaded_job_config = job['config']['config']
-            self.token = await self._action('app', 'getJobAccessToken', [job['id']], lock=False)
+            self.job_token = await self._action('app', 'getJobAccessToken', [job['id']], lock=False)
             self.job_id = job['id']
 
             # todo, implement re-authentication, so we don't have to drop the active connection
             await self.connection.close()
-            await self._connect_job(self.job_id, self.token)
+            await self._connected(self.job_id, self.job_token)
         except Exception as e:
             self.connecting.set_exception(e)
 
