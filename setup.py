@@ -1,7 +1,7 @@
 from setuptools import setup
 from setuptools import find_packages
 
-__version__ = '1.0.4'
+__version__ = '1.0.5'
 
 setup(name='deepkit',
       version=__version__,
@@ -18,7 +18,7 @@ setup(name='deepkit',
           'rx>=1.5',
           'typedload>=1.20',
           'PyYAML>=5.0.0',
-          'psutil>=5.4.6',
+          'psutil>=5.7.0',
           'websockets>=8.1'
       ],
       extras_require={
