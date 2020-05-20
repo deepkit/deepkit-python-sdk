@@ -456,11 +456,13 @@ class Client(threading.Thread):
             return
 
         try:
-            config = get_home_config()
             link: Optional[FolderLink] = None
 
             user_token = self.token
+            account_name = 'dynamic'
+
             if not user_token:
+                config = get_home_config()
                 # when no user_token is given (via deepkit.login() for example)
                 # we need to find the host, port, token from the user config in ~/.deepkit/config
                 if self.options.account:
@@ -472,6 +474,7 @@ class Client(threading.Thread):
                     # default to localhost
                     account_config = config.get_account_for_name('localhost')
 
+                account_name = account_config.name
                 self.host = account_config.host
                 self.port = account_config.port
                 self.ssl = account_config.ssl
@@ -509,8 +512,8 @@ class Client(threading.Thread):
 
                 project = await self._action('app', 'getProjectForPublicName', [self.options.project], lock=False)
                 if not project:
-                    raise Exception(f'No project found for name {self.options.project}. '
-                                    f'Do you use the correct account? (used {account_config.name})')
+                    raise Exception(f'No project found for name {self.options.project}. Make sure it exists before using it. '
+                                    f'Do you use the correct account? (used {account_name})')
 
                 projectId = project['id']
 
