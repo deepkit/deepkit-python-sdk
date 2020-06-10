@@ -97,8 +97,6 @@ class Experiment:
         self.last_throttle_call = dict()
 
         self.client = deepkit.client.Client(options)
-        if deepkit.globals.last_experiment:
-            deepkit.globals.last_experiment.shutdown()
 
         deepkit.globals.last_experiment = self
         self.log_lock = Lock()
@@ -236,6 +234,22 @@ class Experiment:
 
         asyncio.run_coroutine_threadsafe(wait(), self.client.loop).result()
 
+    def done(self):
+        self.client.result_status = deepkit.client.JobStatus.done
+        self.shutdown()
+
+    def abort(self):
+        self.client.result_status = deepkit.client.JobStatus.aborted
+        self.shutdown()
+
+    def crash(self):
+        self.client.result_status = deepkit.client.JobStatus.crashed
+        self.shutdown()
+
+    def failed(self):
+        self.client.result_status = deepkit.client.JobStatus.failed
+        self.shutdown()
+
     def shutdown(self):
         if self.shutting_down: return
         self.shutting_down = True
@@ -362,6 +376,9 @@ class Experiment:
 
     def set_config(self, name: str, value: any):
         self.client.patch('config.config.' + name.replace('.', '/'), value)
+
+    def set_full_config(self, config: any):
+        self.client.patch('config.config', config)
 
     def define_metric(self, name: str, traces: List[str] = None):
         name = name.replace('.', '/')

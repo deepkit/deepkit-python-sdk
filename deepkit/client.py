@@ -6,6 +6,7 @@ import sys
 import threading
 from asyncio import Future
 from datetime import datetime
+from enum import Enum
 from typing import Dict, List, Optional
 import numpy as np
 
@@ -36,6 +37,13 @@ def json_converter(obj):
         return obj.__str__()
 
 
+class JobStatus(Enum):
+    done = 150  # when all tasks are done
+    aborted = 200  # when at least one task aborted
+    failed = 250  # when at least one task failed
+    crashed = 300  # when at least one task crashed
+
+
 class Client(threading.Thread):
     connection: websockets.WebSocketClientProtocol
 
@@ -51,6 +59,8 @@ class Client(threading.Thread):
         self.job_id = os.environ.get('DEEPKIT_JOB_ID', None)
 
         self.token = os.environ.get('DEEPKIT_ACCESSTOKEN', None)
+
+        self.result_status = None
 
         self.message_id = 0
         self.account = 'localhost'
@@ -127,13 +137,13 @@ class Client(threading.Thread):
                     self.patches['tasks.main.status'] = 650
                     self.patches['tasks.main.instances.0.status'] = 650
 
+            if self.result_status:
+                self.patches['status'] = self.result_status.value
+
         while len(self.patches) > 0 or len(self.queue) > 0:
             await asyncio.sleep(0.15)
 
         await self.connection.close()
-
-        if deepkit.utils.in_self_execution():
-            print("Experiment stopped")
 
     def register_controller(self, name: str, controller):
         return asyncio.run_coroutine_threadsafe(self._register_controller(name, controller), self.loop)
@@ -512,8 +522,9 @@ class Client(threading.Thread):
 
                 project = await self._action('app', 'getProjectForPublicName', [self.options.project], lock=False)
                 if not project:
-                    raise Exception(f'No project found for name {self.options.project}. Make sure it exists before using it. '
-                                    f'Do you use the correct account? (used {account_name})')
+                    raise Exception(
+                        f'No project found for name {self.options.project}. Make sure it exists before using it. '
+                        f'Do you use the correct account? (used {account_name})')
 
                 projectId = project['id']
 

@@ -29,14 +29,10 @@ def experiment(project=None, account=None, new=False) -> Experiment:
     :return:
     """
     """
-    :param options: ExperimentOptions
-    :return: returns either a new experiemtn or the last created one. Never creates multiple experiments.
+    :return: returns either a new experiment or the last created one.
     """
-    if deepkit.globals.last_experiment and not deepkit.globals.last_experiment.shutting_down:
-        if not new:
-            return deepkit.globals.last_experiment
-
-        deepkit.globals.last_experiment.end()
+    if deepkit.globals.last_experiment and new is False:
+        return deepkit.globals.last_experiment
 
     return Experiment(ExperimentOptions(project=project, account=account))
 
