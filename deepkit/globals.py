@@ -1,9 +1,9 @@
 import io
 from typing import Optional
 
-import deepkit.experiment
+from deepkit.experiment import Experiment
 
-last_experiment: Optional[deepkit.experiment.Experiment] = None
+last_experiment: Optional[Experiment] = None
 
 loaded_job_config = None
 

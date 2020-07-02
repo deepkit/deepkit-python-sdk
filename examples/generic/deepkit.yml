@@ -1,5 +1,5 @@
 label: Generic data generation
-image: tensorflow/tensorflow:1.15.2-gpu-py3
+image: python:3.7
 build:
     - ADD ../../deepkit:/deepkit-sdk/deepkit
     - ADD ../../setup.py:/deepkit-sdk/setup.py

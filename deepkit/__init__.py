@@ -17,24 +17,41 @@ def log(s):
         deepkit.globals.last_logs.write(s)
 
 
-def experiment(project=None, account=None, new=False) -> Experiment:
+def experiment(project=None, account=None) -> Experiment:
     """
+    Per default this method returns a singleton.
+
+    If you start an experiment using the Deepkit cli (`deepkit run`) or the Deepkit app, the experiment
+    is created beforehand and this method picks it up. If an experiment is run without cli or app,
+    then this method creates a new one. In any case, this method returns always the same instance, so
+    you don't strictly need to save or pass around its return value.
+
+    If you want to create new sub experiments you should use:
+
+        import deepkit
+        root_experiment = deepkit.experiment()
+        sub_experiment = root_experiment.create_sub_experiment()
+
+    This will create _always_ a new child experiments. In this cases, make sure to call `experiment.done()`,
+    (or abort, crashed, failed) manually to end the created experiment and pass around the created experiment
+    instance manually (since its not tracked).
+
     :param project: If the current folder is not linked and you don't specify a project here, an error is raised since
                     Deepkit isn't able to know to which project the experiments data should be sent.
-    :param account: Per default the account linked to this folder is used (see `deepkit link`),
+    :param account: Per default the first account linked to this folder is used (see `deepkit link` or `deepkit-sdk auth -l`),
                     this is on a new system `localhost`.
                     You can overwrite which account is used by specifying the name here (see `deepkit id` for
                     available accounts in your system).
-    :param new: Per default this method returns a singleton. Force a new experiment creation with new=True.
     :return:
     """
     """
     :return: returns either a new experiment or the last created one.
     """
-    if deepkit.globals.last_experiment and new is False:
-        return deepkit.globals.last_experiment
+    if not deepkit.globals.last_experiment:
+        deepkit.globals.last_experiment = Experiment(project=project, account=account, monitoring=True,
+                                                     try_pick_up=True)
 
-    return Experiment(ExperimentOptions(project=project, account=account))
+    return deepkit.globals.last_experiment
 
 
 if deepkit.utils.in_self_execution():
@@ -84,8 +101,8 @@ def login(
 ):
     """
     In environments (like Jupyter Notebooks/Google Colab) where its not possible to use the Deepkit CLI to authenticate
-    with a Deepkit server (deepkit auth) or where "deepkit run" is not used, it's required to provide an access_key
-    directly. Either by specifying one or by providing username/password.
+    with a Deepkit server (deepkit auth) or where "deepkit run" is not used, it's required to provide an access-key
+    or login via username/password.
 
     It's important to call this method BEFORE deepkit.experiment() is called.
     """
@@ -108,8 +125,9 @@ def login(
             access_key = access_key_map[cache_key]
         else:
             print("No access_key provided. Please provide username and password.")
-            print(f"Note: You can create an access_key directly in the CLI using `deepkit access_key {host} --port {port}`")
-            client = Client(ExperimentOptions())
+            print(
+                f"Note: You can create an access_key directly in the CLI using `deepkit access-key {host} --port {port}`")
+            client = Client()
             client.host = host
             client.port = port
             client.ssl = ssl
@@ -122,7 +140,7 @@ def login(
             if not access_key:
                 raise Exception("Credentials check failed")
 
-            print("Login successful.")
+            print("Login successful. Access key is " + access_key)
             access_key_map[cache_key] = access_key
 
     os.environ['DEEPKIT_HOST'] = host

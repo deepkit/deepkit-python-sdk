@@ -369,9 +369,9 @@ def extract_model_graph(model):
                 # 2. scope_prefix='', layer=Sequential1 and tensor is like 'activation/tanh', but we need 'sequential_1/activation/tanh'
                 # 3. scope_prefix='sequential_1', layer=Dense2, tensor is like 'dense_1/Relu', but we need 'sequential_1/dense_2/Relu'
                 if '/' in tensor.name and not tensor.name.startswith(scope_prefix + layer.name + '/'):
-                    if tensor.name.startswith(layer.name + '/'):
+                    try:
                         tensor = g.get_tensor_by_name(scope_prefix + tensor.name)
-                    else:
+                    except:
                         tensor = g.get_tensor_by_name(scope_prefix + layer.name + '/' + tensor.name)
 
                 record_map[scope_prefix + layer.name] = {

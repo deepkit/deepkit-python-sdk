@@ -5,17 +5,17 @@ import os
 import sys
 import threading
 from asyncio import Future
-from datetime import datetime
+import datetime
 from enum import Enum
-from typing import Dict, List, Optional
-import numpy as np
+from typing import Dict, Optional
 
+import numpy as np
 import websockets
 from rx.subject import BehaviorSubject
 
 import deepkit.globals
 from deepkit.home import get_home_config
-from deepkit.model import ExperimentOptions, FolderLink
+from deepkit.model import FolderLink
 
 
 def is_in_directory(filepath, directory):
@@ -31,10 +31,15 @@ def json_converter(obj):
         return int(obj)
     elif isinstance(obj, np.floating):
         return float(obj)
+    elif isinstance(obj, np.float):
+        return float(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
     elif isinstance(obj, datetime.datetime):
-        return obj.__str__()
+        # we assume all datetime instances are UTC
+        return obj.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    else:
+        return str(obj)
 
 
 class JobStatus(Enum):
@@ -47,23 +52,36 @@ class JobStatus(Enum):
 class Client(threading.Thread):
     connection: websockets.WebSocketClientProtocol
 
-    def __init__(self, options: ExperimentOptions):
+    def __init__(self, project: Optional[str] = None,
+                 account: Optional[str] = None,
+                 try_pick_up=False,
+                 parent_experiment=None,
+                 silent=False):
         self.connected = BehaviorSubject(False)
-        self.options: ExperimentOptions = options
+        self.project = project
+        self.account = account
+        self.parent_experiment = parent_experiment
+        self.silent = silent
 
         self.host = os.environ.get('DEEPKIT_HOST', '127.0.0.1')
         self.socket_path = os.environ.get('DEEPKIT_SOCKET', None)
         self.ssl = os.environ.get('DEEPKIT_SSL', '0') is '1'
         self.port = int(os.environ.get('DEEPKIT_PORT', '8960'))
-        self.job_token = os.environ.get('DEEPKIT_JOB_ACCESSTOKEN', None)
-        self.job_id = os.environ.get('DEEPKIT_JOB_ID', None)
 
+        self.job_token = None
+        self.job_id = None
+
+        if try_pick_up:
+            # is set by Deepkit cli
+            self.job_token = os.environ.get('DEEPKIT_JOB_ACCESSTOKEN', None)
+            self.job_id = os.environ.get('DEEPKIT_JOB_ID', None)
+
+        # is set by deepkit.login()
         self.token = os.environ.get('DEEPKIT_ACCESSTOKEN', None)
 
         self.result_status = None
 
         self.message_id = 0
-        self.account = 'localhost'
         self.callbacks: Dict[int, asyncio.Future] = {}
         self.subscriber: Dict[int, any] = {}
         self.stopping = False
@@ -102,24 +120,25 @@ class Client(threading.Thread):
     async def stop_and_sync(self):
         self.stopping = True
 
-        if deepkit.utils.in_self_execution():
+        if deepkit.utils.in_self_execution() or self.result_status:
             # only when we are in self execution do we set status, time stamps etc
-            # otherwise the CLI is doing that and the server.
+            # otherwise the CLI is doing that and the server. Or when
+            # the experiment set result_state explicitly.
 
             # done = 150, //when all tasks are done
             # aborted = 200, //when at least one task aborted
             # failed = 250, //when at least one task failed
             # crashed = 300, //when at least one task crashed
             self.patches['status'] = 150
-            self.patches['ended'] = datetime.now().isoformat()
-            self.patches['tasks.main.ended'] = datetime.now().isoformat()
+            self.patches['ended'] = datetime.datetime.utcnow()
+            self.patches['tasks.main.ended'] = datetime.datetime.utcnow()
 
             # done = 500,
             # aborted = 550,
             # failed = 600,
             # crashed = 650,
             self.patches['tasks.main.status'] = 500
-            self.patches['tasks.main.instances.0.ended'] = datetime.now().isoformat()
+            self.patches['tasks.main.instances.0.ended'] = datetime.datetime.utcnow()
 
             # done = 500,
             # aborted = 550,
@@ -338,12 +357,12 @@ class Client(threading.Thread):
                     try:
                         j = json.dumps(m, default=json_converter)
                     except TypeError as e:
-                        print('Could not send message since JSON error', e, m)
+                        print('Could not send message since JSON error', e, m, file=sys.stderr)
                         continue
                     await connection.send(j)
                     self.queue.remove(m)
             except Exception as e:
-                print("Failed sending, exit send_messages")
+                print("Failed sending, exit send_messages", file=sys.stderr)
                 raise e
 
             if len(self.patches) > 0:
@@ -363,7 +382,7 @@ class Client(threading.Thread):
                             send
                         ],
                         'timeout': 60
-                    }))
+                    }, default=json_converter))
 
                     for i in send.keys():
                         if self.patches[i] == send[i]:
@@ -396,7 +415,7 @@ class Client(threading.Thread):
                     del self.callbacks[res['id']]
 
         if not self.stopping:
-            print("Deepkit: lost connection. reconnect ...")
+            self.log("Deepkit: lost connection. reconnect ...")
             self.connecting = self.loop.create_future()
             self.connected.on_next(False)
             self.loop.create_task(self._connect())
@@ -411,7 +430,7 @@ class Client(threading.Thread):
                 self.connection = await websockets.connect(url)
         except Exception as e:
             # try again later
-            print('Unable to connect', e)
+            self.log('Unable to connect', e)
             await asyncio.sleep(1)
             self.loop.create_task(self._connect())
             return
@@ -430,7 +449,7 @@ class Client(threading.Thread):
                 }
             }, lock=False)
 
-            await self.connection.send(json.dumps(message))
+            await self.connection.send(json.dumps(message, default=json_converter))
 
             res = await self.callbacks[message['id']]
             if not res['result'] or res['result'] is not True:
@@ -440,7 +459,7 @@ class Client(threading.Thread):
 
         self.connecting.set_result(True)
         if self.connections > 0:
-            print("Deepkit: Reconnected.")
+            self.log("Deepkit: Reconnected.")
 
         self.connected.on_next(True)
         self.connections += 1
@@ -469,20 +488,21 @@ class Client(threading.Thread):
             link: Optional[FolderLink] = None
 
             user_token = self.token
-            account_name = 'dynamic'
+            account_name = 'none'
 
             if not user_token:
                 config = get_home_config()
                 # when no user_token is given (via deepkit.login() for example)
                 # we need to find the host, port, token from the user config in ~/.deepkit/config
-                if self.options.account:
-                    account_config = config.get_account_for_name(self.options.account)
-                elif not self.options.project:
+                if not self.account and not self.project:
+                    # find both, start with
                     link = config.get_folder_link_of_directory(sys.path[0])
                     account_config = config.get_account_for_id(link.accountId)
+                elif self.account and not self.project:
+                    account_config = config.get_account_for_name(self.account)
                 else:
-                    # default to localhost
-                    account_config = config.get_account_for_name('localhost')
+                    # default to first account configured
+                    account_config = config.get_first_account()
 
                 account_name = account_config.name
                 self.host = account_config.host
@@ -496,7 +516,7 @@ class Client(threading.Thread):
                 self.connection = await websockets.connect(url)
             except Exception as e:
                 self.offline = True
-                print(f"Deepkit: App not started or server not reachable. Monitoring disabled. {e}")
+                print(f"Deepkit: App not started or server not reachable. Monitoring disabled. {e}", file=sys.stderr)
                 self.connecting.set_result(False)
                 return
 
@@ -513,23 +533,29 @@ class Client(threading.Thread):
             if not res['result']:
                 raise Exception('Login invalid')
 
+            project_name = ''
             if link:
+                project_name = link.name
                 projectId = link.projectId
             else:
-                if not self.options.project:
-                    raise Exception('No project defined. Please use project="project-name"'
+                if not self.project:
+                    raise Exception('No project defined. Please use project="project-name" '
                                     'to specify which project to use.')
 
-                project = await self._action('app', 'getProjectForPublicName', [self.options.project], lock=False)
+                project = await self._action('app', 'getProjectForPublicName', [self.project], lock=False)
+
                 if not project:
                     raise Exception(
-                        f'No project found for name {self.options.project}. Make sure it exists before using it. '
+                        f'No project found for name {self.project}. Make sure it exists before using it. '
                         f'Do you use the correct account? (used {account_name})')
-
+                project_name = project['name']
                 projectId = project['id']
 
-            job = await self._action('app', 'createJob', [projectId],
+            job = await self._action('app', 'createJob', [projectId, self.parent_experiment],
                                      lock=False)
+
+            prefix = "Sub experiment" if self.parent_experiment else "Experiment"
+            self.log(f"{prefix} #{job['number']} created in project {project_name} using account {account_name}")
 
             deepkit.globals.loaded_job_config = job['config']['config']
             self.job_token = await self._action('app', 'getJobAccessToken', [job['id']], lock=False)
@@ -542,3 +568,6 @@ class Client(threading.Thread):
             self.connecting.set_exception(e)
 
         self.queue = queue_copy + self.queue
+
+    def log(self, *message: str):
+        if not self.silent: print(*message)

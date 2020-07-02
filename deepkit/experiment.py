@@ -87,18 +87,45 @@ class JobDebuggerController:
 
 
 class Experiment:
-    def __init__(self, options: ExperimentOptions = None):
-        if options is None:
-            options = ExperimentOptions()
+    def __init__(self, project=None, account=None, monitoring=True, try_pick_up=False, parent_experiment=None,
+                 silent=False):
+        """
+        :type project: str If the current folder is not linked and you don't specify a project here, an error is raised since
+        Deepkit isn't able to know to which project the experiments data should be sent.
+
+        :type account: str Per default the first account linked to this folder is used (see `deepkit link` or `deepkit-sdk auth -l`),
+        this is on a new system `localhost`.
+        You can overwrite which account is used by specifying the name here (see `deepkit id` for
+        available accounts in your system).
+
+        :type monitoring: bool When true this experiment sends current stdout as experiment logs and monitors
+        hardware utilisation of the current process.
+
+        :type try_pick_up: bool Whether it should be tried to pick up an existing experiment created by the
+        CLI/App (determined by environment variables). For manually created experiments this should be False.
+
+        :tye parent_experiment: str When defined moves this experiment as sub experiment
+        """
+        self.account = account
+        self.project = project
+        self.monitoring = monitoring
+        self.parent_experiment = parent_experiment
+        self.silent = silent
+
+        if not self.parent_experiment:
+            if deepkit.globals.last_experiment:
+                self.parent_experiment = deepkit.globals.last_experiment.id
+            else:
+                self.parent_experiment = os.environ.get('DEEPKIT_JOB_ID', None)
 
         self.metric_buffer = []
         self.speed_buffer = []
         self.logs_buffer = []
         self.last_throttle_call = dict()
 
-        self.client = deepkit.client.Client(options)
+        self.client = deepkit.client.Client(project=project, account=account, try_pick_up=try_pick_up,
+                                            parent_experiment=self.parent_experiment, silent=self.silent)
 
-        deepkit.globals.last_experiment = self
         self.log_lock = Lock()
         self.defined_metrics = {}
         self.shutting_down = False
@@ -143,15 +170,17 @@ class Experiment:
         try:
             self.client.connect()
             self.wait_for_connect()
-        except Exception:
-            deepkit.globals.last_experiment = None
+        except Exception as e:
+            print("Error connecting to Deepkit. Experiment data sync aborted.", e)
+            if deepkit.globals.last_experiment is self:
+                deepkit.globals.last_experiment = None
 
-        if deepkit.utils.in_self_execution():
+        if deepkit.utils.in_self_execution() and monitoring:
             # the CLI handles output logging otherwise
             if len(deepkit.globals.last_logs.getvalue()) > 0:
                 self.logs_buffer.append(deepkit.globals.last_logs.getvalue())
 
-        if deepkit.utils.in_self_execution():
+        if deepkit.utils.in_self_execution() and monitoring:
             # the CLI handles hardware monitoring otherwise
             p = psutil.Process()
 
@@ -179,11 +208,27 @@ class Experiment:
 
             self.hardware_subscription = interval(1).subscribe(on_hardware_metrics)
 
+    @property
+    def full_id(self):
+        return self.client.job_id
+
+    @property
+    def id(self):
+        return self.client.job_id
+
     def throttle_call(self, fn: Callable, delay: int = 1000):
         last_time = self.last_throttle_call.get(fn)
         if not last_time or (time.time() - (delay / 1000)) > last_time:
             self.last_throttle_call[fn] = time.time()
             fn()
+
+    def create_sub_experiment(self):
+        return Experiment(
+            project=self.project,
+            account=self.account,
+            parent_experiment=self.id,
+            silent=self.silent
+        )
 
     def drain_speed_report(self):
         # only save latest value, each second
@@ -362,7 +407,7 @@ class Experiment:
         self.client.patch('title', s)
 
     def set_info(self, name: str, value: any):
-        self.client.patch('infos.' + str(name.replace('.', '/')), value)
+        self.client.patch('infos.' + str(name).replace('.', '/'), value)
 
     def set_description(self, description: any):
         self.client.patch('description', description)
@@ -375,7 +420,7 @@ class Experiment:
         self.client.job_action_threadsafe('removeLabel', [label_name])
 
     def set_config(self, name: str, value: any):
-        self.client.patch('config.config.' + name.replace('.', '/'), value)
+        self.client.patch('config.config.' + str(name).replace('.', '/'), value)
 
     def set_full_config(self, config: any):
         self.client.patch('config.config', config)
@@ -652,7 +697,7 @@ class Experiment:
             self.client.job_action_threadsafe('addInsightEntry', [
                 x,
                 file_name,
-                datetime.now().isoformat(),
+                datetime.utcnow().isoformat(),
                 {
                     'type': file_type,
                     'meta': meta

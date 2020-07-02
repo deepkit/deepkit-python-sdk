@@ -42,6 +42,10 @@ class HomeConfig(NamedTuple):
     accounts: List[Account]
     folderLinks: List[FolderLink]
 
+    def get_first_account(self) -> Account:
+        if len(self.accounts) is 0: raise Exception(f'No Deepkit accounts configured.')
+        return self.accounts[0]
+
     def get_account_for_name(self, name: str) -> Account:
         for account in self.accounts:
             if account.name == name:
