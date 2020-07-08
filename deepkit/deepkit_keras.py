@@ -61,6 +61,7 @@ class KerasCallback(keras.callbacks.Callback):
         self.all_losses = None
         self.loss_metric = None
         self.learning_rate_metric = None
+        self.learning_rate_start = 0
 
     def set_model(self, model):
         super().set_model(model)
@@ -114,19 +115,19 @@ class KerasCallback(keras.callbacks.Callback):
 
     def on_batch_begin(self, batch, logs={}):
         if 'nb_batches' not in self.current:
-            batch_size = logs['size']
-            if 'samples' in self.params:
+            batch_size = logs.get('size', 1)
+            if 'samples' in self.params and batch_size > 0:
                 nb_batches = math.ceil(self.params['samples'] / batch_size)  # normal nb batches
-            else:
+            elif 'steps' in self.params:
                 nb_batches = self.params['steps']
+            else:
+                nb_batches = 1
 
             self.current['nb_batches'] = nb_batches
-            self.current['batch_size'] = batch_size
-            self.experiment.set_info('Batch size', batch_size)
 
     def on_batch_end(self, batch, logs={}):
         self.filter_invalid_json_values(logs)
-        self.experiment.batch(batch + 1, self.current['nb_batches'], logs['size'])
+        self.experiment.batch(batch + 1, self.current['nb_batches'], logs.get('size', 1))
 
     def on_epoch_begin(self, epoch, logs={}):
         self.experiment.epoch(epoch + 1, self.params['epochs'])
