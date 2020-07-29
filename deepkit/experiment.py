@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 from threading import Lock
 from typing import Optional, Callable, NamedTuple, Dict, List
+import math
 
 import PIL.Image
 import numpy as np
@@ -356,6 +357,12 @@ class Experiment:
             # nothing to do
             return
 
+        if current < self.job_step:
+            # it was reset, new epoch/iteration basically
+            self.job_step = 0
+
+        steps_made = current - self.job_step
+
         self.job_step = current
         if total is not None:
             self.job_steps = total
@@ -371,8 +378,12 @@ class Experiment:
             speed_per_second = size / (now - self.last_batch_time) if self.last_batch_time else size
 
         if self.last_batch_time:
+            time_per_step = step_since_last_took = (now - self.last_batch_time)
+            if steps_made > 0:
+                time_per_step = step_since_last_took / steps_made
+
             self.seconds_per_iterations.append({
-                'diff': (now - self.last_batch_time) * total,
+                'diff': time_per_step * total,
                 'when': now
             })
 
@@ -712,7 +723,12 @@ class Experiment:
         if not isinstance(y, (list, tuple)):
             y = [y]
 
-        y = [float(v) if v is not None else 0 for v in y]
+        def convert(v):
+            if v is None: return 0
+            if math.isnan(v): return 0
+            return float(v)
+
+        y = [convert(v) for v in y]
 
         if x is None:
             if self.job_steps > 0:
