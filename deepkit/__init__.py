@@ -59,19 +59,19 @@ if deepkit.utils.in_self_execution():
         def __init__(self, s):
             self.s = s
 
-        def fileno(self):
-            return self.s.fileno()
-
-        def isatty(self):
-            return self.s.isatty()
-
-        def flush(self):
-            self.s.flush()
-
         def write(self, s):
             self.s.write(s)
             log(s)
 
+        def __getattr__(self, name):
+            if name == "s":
+                super(StdHook, self).__getattr__(name)
+            return getattr(self.s, name)
+
+        def __setattr__(self, name, value):
+            if name == "s":
+                super(StdHook, self).__setattr__(name, value)
+            return setattr(self.s, name, value)
 
     sys.stdout = StdHook(sys.__stdout__)
     sys.stderr = StdHook(sys.__stderr__)
