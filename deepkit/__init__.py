@@ -64,13 +64,26 @@ if deepkit.utils.in_self_execution():
             log(s)
 
         def __getattr__(self, name):
-            if name == "s":
-                super(StdHook, self).__getattr__(name)
+            """Forward the __getattr__ call to the wrapped object.
+
+            From https://docs.python.org/3/reference/datamodel.html#object.__getattr__:
+            > Note that if the attribute is found through the normal mechanism,
+            > __getattr__() is not called.
+
+            Therefore, `self.s` does not run into a recursion error.
+            """
             return getattr(self.s, name)
 
         def __setattr__(self, name, value):
+            """Set an attribute on the wrapped object.
+
+            Taken from: https://stackoverflow.com/a/17020163/15235649
+
+            Note: `super(StdHook, self).__setattr__` returns the method from
+                  `object.__setattr__.
+            """
             if name == "s":
-                super(StdHook, self).__setattr__(name, value)
+                return super(StdHook, self).__setattr__(name, value)
             return setattr(self.s, name, value)
 
     sys.stdout = StdHook(sys.__stdout__)
